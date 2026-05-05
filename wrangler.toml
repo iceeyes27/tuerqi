@@ -12,4 +12,4 @@ RETENTION_DAYS = "60"
 
 [[kv_namespaces]]
 binding = "PRICE_HISTORY"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "99ec8198359743f8a4840e523d431ebc"
