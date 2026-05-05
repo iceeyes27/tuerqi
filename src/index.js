@@ -1,5 +1,6 @@
 const HISTORY_KEY = "seagm:history:v1";
 const DEFAULT_RETENTION_DAYS = 60;
+const GOOGLE_FINANCE_TRY_CNY_URL = "https://www.google.com/finance/quote/TRY-CNY";
 
 export default {
   async scheduled(event, env, ctx) {
@@ -43,10 +44,12 @@ async function runMonitor(env, options = {}) {
 
   const html = await fetchSeagmHtml(env.SEAGM_URL);
   const denoms = parseDenoms(env.DENOMS);
-  const prices = extractPrices(html, denoms);
+  const fx = await fetchGoogleFxSnapshot(denoms);
+  const prices = enrichPricesWithGoogleReference(extractPrices(html, denoms), fx);
   const record = {
     capturedAt: new Date().toISOString(),
     sourceUrl: env.SEAGM_URL,
+    fx,
     prices,
   };
 
@@ -61,6 +64,104 @@ async function runMonitor(env, options = {}) {
     dryRun: Boolean(options.dryRun),
     record,
   };
+}
+
+async function fetchGoogleFxSnapshot(denoms) {
+  try {
+    const response = await fetchWithTimeout(GOOGLE_FINANCE_TRY_CNY_URL, {
+      headers: {
+        "accept": "text/html,application/xhtml+xml",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "user-agent": "Mozilla/5.0 seagm-price-monitor/2.0",
+      },
+    }, 8000);
+
+    if (!response.ok) {
+      throw new Error(`Google Finance request failed: ${response.status} ${response.statusText}`);
+    }
+
+    const pageHtml = await response.text();
+    const rateCnyPerTry = extractGoogleTryCnyRate(pageHtml);
+    if (!Number.isFinite(rateCnyPerTry) || rateCnyPerTry <= 0) {
+      throw new Error("Could not parse Google Finance TRY/CNY rate");
+    }
+
+    return {
+      ok: true,
+      source: "Google Finance",
+      sourceUrl: GOOGLE_FINANCE_TRY_CNY_URL,
+      pair: "TRY/CNY",
+      rateCnyPerTry,
+      prices: denoms.map((denomTl) => ({
+        denomTl,
+        priceCny: round2(denomTl * rateCnyPerTry),
+      })),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      source: "Google Finance",
+      sourceUrl: GOOGLE_FINANCE_TRY_CNY_URL,
+      pair: "TRY/CNY",
+      error: error?.message || String(error),
+      prices: [],
+    };
+  }
+}
+
+async function fetchWithTimeout(url, init, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("timeout"), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function extractGoogleTryCnyRate(pageHtml) {
+  const dataLastPrice = pageHtml.match(/data-last-price="([0-9.]+)"/);
+  if (dataLastPrice) {
+    return Number(dataLastPrice[1]);
+  }
+
+  const financePrice = pageHtml.match(/<div[^>]+class="[^"]*\bYMlKec\b[^"]*"[^>]*>\s*([0-9.,]+)\s*<\/div>/);
+  if (financePrice) {
+    return Number(financePrice[1].replace(/,/g, ""));
+  }
+
+  const textPrice = pageHtml.match(/1\s+Turkish\s+Lira\s*=\s*([0-9.]+)\s+Chinese\s+Yuan/i);
+  if (textPrice) {
+    return Number(textPrice[1]);
+  }
+
+  return NaN;
+}
+
+function enrichPricesWithGoogleReference(prices, fx) {
+  if (!fx?.ok) {
+    return prices.map((price) => ({
+      ...price,
+      googlePriceCny: null,
+      googlePremiumCny: null,
+      googlePremiumPercent: null,
+    }));
+  }
+
+  return prices.map((price) => {
+    const googlePriceCny = round2(price.denomTl * fx.rateCnyPerTry);
+    const googlePremiumCny = round2(price.priceCny - googlePriceCny);
+    const googlePremiumPercent = googlePriceCny > 0
+      ? round2((price.priceCny / googlePriceCny - 1) * 100)
+      : null;
+
+    return {
+      ...price,
+      googlePriceCny,
+      googlePremiumCny,
+      googlePremiumPercent,
+    };
+  });
 }
 
 async function fetchSeagmHtml(url) {
@@ -536,10 +637,14 @@ function renderLatestCards(latest, denoms) {
       return `<article class="card"><div class="label">${denom} TL</div><div class="price">--</div><div class="sub">等待首次抓取</div></article>`;
     }
 
+    const googleLine = Number.isFinite(price.googlePriceCny)
+      ? `Google ¥${formatMoney(price.googlePriceCny)} · 差额 ${formatSignedMoney(price.googlePremiumCny)} · ${formatSignedPercent(price.googlePremiumPercent)}`
+      : `Google 汇率暂无${latest?.fx?.error ? ` · ${escapeHtml(latest.fx.error)}` : ""}`;
+
     return `<article class="card">
       <div class="label">${denom} TL</div>
       <div class="price">¥${formatMoney(price.priceCny)}</div>
-      <div class="sub">原价 ¥${formatMoney(price.originalPriceCny)} · 折扣 ${formatMoney(price.discountPercent)}%<br>SEAGM Credits ${price.credits}</div>
+      <div class="sub">原价 ¥${formatMoney(price.originalPriceCny)} · 折扣 ${formatMoney(price.discountPercent)}%<br>${googleLine}<br>SEAGM Credits ${price.credits}</div>
     </article>`;
   }).join("");
 }
@@ -601,11 +706,17 @@ function renderHistoryTable(records, denoms) {
     return `<div class="empty">暂无历史记录。</div>`;
   }
 
-  const header = denoms.map((denom) => `<th>${denom} TL</th>`).join("");
+  const header = denoms.map((denom) =>
+    `<th>${denom} TL SEAGM</th><th>${denom} TL Google</th><th>差额</th>`
+  ).join("");
   const rows = [...records].reverse().map((record) => {
     const cells = denoms.map((denom) => {
       const price = record.prices.find((item) => item.denomTl === denom);
-      return `<td>${price ? `¥${formatMoney(price.priceCny)}` : "--"}</td>`;
+      if (!price) {
+        return "<td>--</td><td>--</td><td>--</td>";
+      }
+
+      return `<td>¥${formatMoney(price.priceCny)}</td><td>${Number.isFinite(price.googlePriceCny) ? `¥${formatMoney(price.googlePriceCny)}` : "--"}</td><td>${Number.isFinite(price.googlePremiumCny) ? formatSignedMoney(price.googlePremiumCny) : "--"}</td>`;
     }).join("");
 
     return `<tr>
@@ -656,6 +767,22 @@ function round2(value) {
 
 function formatMoney(value) {
   return Number(value).toFixed(2).replace(/\.00$/, "");
+}
+
+function formatSignedMoney(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  return `${number >= 0 ? "+" : "-"}¥${formatMoney(Math.abs(number))}`;
+}
+
+function formatSignedPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  return `${number >= 0 ? "+" : ""}${formatMoney(number)}%`;
 }
 
 function formatDateTime(value) {
