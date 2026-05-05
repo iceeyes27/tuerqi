@@ -64,7 +64,10 @@ async function runMonitor(env, options = {}) {
 }
 
 async function fetchSeagmHtml(url) {
-  const response = await fetch(url, {
+  const cookieJar = new Map();
+  await configureSeagmSession(url, cookieJar);
+
+  const response = await fetchWithCookies(url, cookieJar, {
     headers: {
       "accept": "text/html,application/xhtml+xml",
       "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -77,6 +80,93 @@ async function fetchSeagmHtml(url) {
   }
 
   return response.text();
+}
+
+async function configureSeagmSession(productUrl, cookieJar) {
+  const url = new URL(productUrl);
+  const originPath = `${url.pathname}${url.search}`;
+  const languageUrl = `${url.origin}/zh-cn/language_currency?origin=${encodeURIComponent(originPath)}`;
+
+  const languageResponse = await fetchWithCookies(languageUrl, cookieJar, {
+    headers: {
+      "accept": "text/html,application/xhtml+xml",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "user-agent": "Mozilla/5.0 seagm-price-monitor/2.0",
+    },
+  });
+
+  if (!languageResponse.ok) {
+    throw new Error(`SEAGM session init failed: ${languageResponse.status} ${languageResponse.statusText}`);
+  }
+
+  const languageHtml = await languageResponse.text();
+  const tokenMatch = languageHtml.match(/\/zh-cn\/setting\?csrfToken=([a-z0-9]+)/i);
+  if (!tokenMatch) {
+    throw new Error("Could not find SEAGM csrfToken for currency setting");
+  }
+
+  const settingUrl = `${url.origin}/zh-cn/setting?csrfToken=${tokenMatch[1]}`;
+  const settingResponse = await fetchWithCookies(settingUrl, cookieJar, {
+    method: "POST",
+    headers: {
+      "accept": "text/html,application/xhtml+xml",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "content-type": "application/x-www-form-urlencoded",
+      "origin": url.origin,
+      "referer": languageUrl,
+      "user-agent": "Mozilla/5.0 seagm-price-monitor/2.0",
+    },
+    body: new URLSearchParams({
+      region: "cn",
+      language: "zh",
+      currency: "CNY",
+    }),
+  });
+
+  if (!settingResponse.ok) {
+    throw new Error(`SEAGM currency setting failed: ${settingResponse.status} ${settingResponse.statusText}`);
+  }
+
+  await settingResponse.arrayBuffer();
+}
+
+async function fetchWithCookies(url, cookieJar, init = {}) {
+  const headers = new Headers(init.headers || {});
+  const cookieHeader = serializeCookies(cookieJar);
+  if (cookieHeader) {
+    headers.set("cookie", cookieHeader);
+  }
+
+  const response = await fetch(url, { ...init, headers });
+  storeSetCookies(response.headers, cookieJar);
+  return response;
+}
+
+function storeSetCookies(headers, cookieJar) {
+  const values = typeof headers.getSetCookie === "function"
+    ? headers.getSetCookie()
+    : splitSetCookieHeader(headers.get("set-cookie"));
+
+  for (const value of values) {
+    const pair = value.split(";", 1)[0];
+    const separator = pair.indexOf("=");
+    if (separator > 0) {
+      cookieJar.set(pair.slice(0, separator), pair.slice(separator + 1));
+    }
+  }
+}
+
+function splitSetCookieHeader(value) {
+  if (!value) {
+    return [];
+  }
+  return value.split(/,(?=\s*[^;,]+=)/).map((item) => item.trim()).filter(Boolean);
+}
+
+function serializeCookies(cookieJar) {
+  return [...cookieJar.entries()]
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
 }
 
 function extractPrices(pageHtml, denoms) {
