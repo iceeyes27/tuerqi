@@ -80,6 +80,13 @@ async function fetchSeagmHtml(url) {
 }
 
 function extractPrices(pageHtml, denoms) {
+  const pageCurrency = detectPageCurrency(pageHtml);
+  if (pageCurrency && pageCurrency !== "CNY") {
+    throw new Error(`SEAGM returned ${pageCurrency} page instead of CNY page`);
+  }
+
+  const creditRate = extractCreditRate(pageHtml);
+  const clientDataPrices = extractPricesFromClientData(pageHtml, denoms, creditRate);
   const skuBlocks = pageHtml.match(/<label>[\s\S]*?<\/label>/gi) || [];
 
   return denoms.map((denom) => {
@@ -91,25 +98,101 @@ function extractPrices(pageHtml, denoms) {
       /<div class="price">[\s\S]*?<b>¥\s*([0-9.]+)<\/b>\s*<b class="price_origional">¥\s*([0-9.]+)<\/b>/i
     );
 
-    if (!match) {
-      throw new Error(`Could not find CNY price for ${denom} TL on SEAGM page`);
+    if (match) {
+      return buildPrice(denom, Number(match[1]), Number(match[2]), creditRate);
     }
 
-    const priceCny = Number(match[1]);
-    const originalPriceCny = Number(match[2]);
-    const discountPercent = originalPriceCny > 0
-      ? round2((1 - priceCny / originalPriceCny) * 100)
-      : 0;
+    const fromClientData = clientDataPrices.get(denom);
+    if (fromClientData) {
+      return fromClientData;
+    }
 
-    return {
-      denomTl: denom,
-      priceCny,
-      originalPriceCny,
-      discountPercent,
-      credits: Math.round(priceCny * 58.032155),
-      available: true,
-    };
+    const currencyHint = pageCurrency ? ` currency=${pageCurrency}` : "";
+    throw new Error(`Could not find CNY price for ${denom} TL on SEAGM page.${currencyHint}`);
   });
+}
+
+function extractPricesFromClientData(pageHtml, denoms, creditRate) {
+  const prices = new Map();
+  const match = pageHtml.match(/window\.clientData\s*=\s*(\{[\s\S]*?\});/);
+  if (!match) {
+    return prices;
+  }
+
+  let clientData;
+  try {
+    clientData = JSON.parse(match[1]);
+  } catch {
+    return prices;
+  }
+
+  const cardTypeList = clientData.cardTypeList || {};
+  const cardRuleList = clientData.cardRuleList || {};
+
+  for (const denom of denoms) {
+    const cardType = Object.values(cardTypeList).find((item) =>
+      String(item.name_us || item.name || "").includes(`iTunes Gift Card ${denom} TL TR`)
+    );
+
+    if (!cardType) {
+      continue;
+    }
+
+    const originalPriceCny = Number(cardType.origin_price || cardType.origin_unit_price || cardType.unit_price);
+    if (!Number.isFinite(originalPriceCny)) {
+      continue;
+    }
+
+    const rule = Array.isArray(cardRuleList[cardType.id]) ? cardRuleList[cardType.id][0] : null;
+    const rebate = rule?.type === "discount" ? Number(rule.rebate || 0) : 0;
+    const priceCny = rebate > 0
+      ? round2(originalPriceCny * (1 - rebate / 100))
+      : originalPriceCny;
+
+    prices.set(denom, buildPrice(denom, priceCny, originalPriceCny, creditRate));
+  }
+
+  return prices;
+}
+
+function buildPrice(denomTl, priceCny, originalPriceCny, creditRate) {
+  const discountPercent = originalPriceCny > 0
+    ? round2((1 - priceCny / originalPriceCny) * 100)
+    : 0;
+
+  return {
+    denomTl,
+    priceCny,
+    originalPriceCny,
+    discountPercent,
+    credits: Math.round(priceCny * creditRate),
+    available: true,
+  };
+}
+
+function extractCreditRate(pageHtml) {
+  const match = pageHtml.match(/var\s+fromCurrencyRate\s*=\s*([0-9.]+);/);
+  const rate = match ? Number(match[1]) : NaN;
+  return Number.isFinite(rate) && rate > 0 ? rate : 58.032155;
+}
+
+function detectPageCurrency(pageHtml) {
+  const gtmCurrency = pageHtml.match(/Currency:\s*'([A-Z]{3})'/);
+  if (gtmCurrency) {
+    return gtmCurrency[1];
+  }
+
+  const jsonCurrency = pageHtml.match(/"currency"\s*:\s*"([A-Z]{3})"/);
+  if (jsonCurrency) {
+    return jsonCurrency[1];
+  }
+
+  const formatCurrency = pageHtml.match(/"currency_format"\s*:\s*"\\u00a5 \$m"/);
+  if (formatCurrency) {
+    return "CNY";
+  }
+
+  return "";
 }
 
 async function loadHistory(env) {
