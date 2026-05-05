@@ -1,0 +1,11 @@
+name = "seagm-price-monitor"
+main = "src/index.js"
+compatibility_date = "2026-05-05"
+
+[triggers]
+crons = ["0 2 * * *"]
+
+[vars]
+SEAGM_URL = "https://www.seagm.com/zh-cn/itunes-gift-card-turkey?item_id=16820"
+DENOMS = "500,1000,2000"
+GOOGLE_SHEET_NAME = "Prices"
