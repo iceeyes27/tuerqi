@@ -1,5 +1,5 @@
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
+const HISTORY_KEY = "seagm:history:v1";
+const DEFAULT_RETENTION_DAYS = 60;
 
 export default {
   async scheduled(event, env, ctx) {
@@ -8,34 +8,58 @@ export default {
 
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname !== "/run") {
-      return json({
-        ok: true,
-        usage: "GET /run to scrape and append rows. Add ?dry=1 to scrape without writing to Google Sheets.",
-      });
-    }
 
-    const dryRun = url.searchParams.get("dry") === "1";
-    const result = await runMonitor(env, { dryRun });
-    return json(result);
+    try {
+      if (url.pathname === "/") {
+        const history = await loadHistory(env);
+        return html(renderDashboard(history, env));
+      }
+
+      if (url.pathname === "/api/history") {
+        const history = await loadHistory(env);
+        return json({
+          ok: true,
+          retentionDays: retentionDays(env),
+          latest: latestRecord(history),
+          records: history,
+        });
+      }
+
+      if (url.pathname === "/run") {
+        const dryRun = url.searchParams.get("dry") === "1";
+        const result = await runMonitor(env, { dryRun });
+        return json(result);
+      }
+
+      return json({ ok: false, error: "Not found" }, 404);
+    } catch (error) {
+      return json({ ok: false, error: error.message }, 500);
+    }
   },
 };
 
 async function runMonitor(env, options = {}) {
+  assertKv(env);
+
   const html = await fetchSeagmHtml(env.SEAGM_URL);
   const denoms = parseDenoms(env.DENOMS);
   const prices = extractPrices(html, denoms);
-  const rows = buildRows(prices, env.SEAGM_URL);
+  const record = {
+    capturedAt: new Date().toISOString(),
+    sourceUrl: env.SEAGM_URL,
+    prices,
+  };
 
   if (!options.dryRun) {
-    await appendRowsToSheet(env, rows);
+    const history = await loadHistory(env);
+    history.push(record);
+    await saveHistory(env, pruneHistory(history, retentionDays(env)));
   }
 
   return {
     ok: true,
     dryRun: Boolean(options.dryRun),
-    count: rows.length,
-    rows,
+    record,
   };
 }
 
@@ -44,7 +68,7 @@ async function fetchSeagmHtml(url) {
     headers: {
       "accept": "text/html,application/xhtml+xml",
       "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-      "user-agent": "Mozilla/5.0 seagm-price-monitor/1.0",
+      "user-agent": "Mozilla/5.0 seagm-price-monitor/2.0",
     },
   });
 
@@ -55,8 +79,8 @@ async function fetchSeagmHtml(url) {
   return response.text();
 }
 
-function extractPrices(html, denoms) {
-  const skuBlocks = html.match(/<label>[\s\S]*?<\/label>/gi) || [];
+function extractPrices(pageHtml, denoms) {
+  const skuBlocks = pageHtml.match(/<label>[\s\S]*?<\/label>/gi) || [];
 
   return denoms.map((denom) => {
     const block = skuBlocks.find((item) =>
@@ -88,123 +112,351 @@ function extractPrices(html, denoms) {
   });
 }
 
-function buildRows(prices, sourceUrl) {
-  const capturedAt = new Date().toISOString();
-  return prices.map((price) => [
-    capturedAt,
-    price.denomTl,
-    price.priceCny,
-    price.originalPriceCny,
-    price.discountPercent,
-    price.credits,
-    price.available ? "available" : "unavailable",
-    sourceUrl,
-  ]);
+async function loadHistory(env) {
+  assertKv(env);
+  const history = await env.PRICE_HISTORY.get(HISTORY_KEY, "json");
+  return Array.isArray(history) ? history : [];
 }
 
-async function appendRowsToSheet(env, rows) {
-  assertEnv(env, [
-    "GOOGLE_SERVICE_ACCOUNT_EMAIL",
-    "GOOGLE_PRIVATE_KEY",
-    "GOOGLE_SHEET_ID",
-    "GOOGLE_SHEET_NAME",
-  ]);
+async function saveHistory(env, history) {
+  await env.PRICE_HISTORY.put(HISTORY_KEY, JSON.stringify(history));
+}
 
-  const token = await getGoogleAccessToken(env);
-  const range = encodeURIComponent(`${env.GOOGLE_SHEET_NAME}!A:H`);
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+function pruneHistory(history, days) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  return history
+    .filter((record) => Date.parse(record.capturedAt) >= cutoff)
+    .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt));
+}
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "authorization": `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ values: rows }),
-  });
+function renderDashboard(history, env) {
+  const denoms = parseDenoms(env.DENOMS);
+  const latest = latestRecord(history);
+  const records = pruneHistory(history, retentionDays(env));
+  const chart = renderChart(records, denoms);
+  const latestCards = renderLatestCards(latest, denoms);
+  const table = renderHistoryTable(records, denoms);
+  const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Google Sheets append failed: ${response.status} ${body}`);
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SEAGM 土区礼品卡价格</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f2;
+      --ink: #1c2321;
+      --muted: #66706b;
+      --line: #d9dfd7;
+      --panel: #ffffff;
+      --green: #1e7c63;
+      --blue: #2f68b8;
+      --coral: #c9513e;
+      --amber: #a86912;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      letter-spacing: 0;
+    }
+    main {
+      width: min(1120px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 40px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 22px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1.05;
+      font-weight: 760;
+    }
+    .meta {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    a.button {
+      display: inline-flex;
+      align-items: center;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    a.primary {
+      background: var(--green);
+      border-color: var(--green);
+      color: white;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 128px;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .price {
+      margin-top: 8px;
+      font-size: 32px;
+      line-height: 1;
+      font-weight: 790;
+    }
+    .sub {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin-top: 14px;
+      overflow: hidden;
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+    .chart-wrap {
+      padding: 12px 16px 16px;
+      overflow-x: auto;
+    }
+    svg {
+      display: block;
+      width: 100%;
+      min-width: 720px;
+      height: auto;
+    }
+    .legend {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      margin-right: 6px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      padding: 11px 14px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      background: #fbfcf9;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .empty {
+      padding: 34px 16px;
+      color: var(--muted);
+      text-align: center;
+    }
+    @media (max-width: 760px) {
+      header { display: block; }
+      .actions { justify-content: flex-start; margin-top: 14px; }
+      .cards { grid-template-columns: 1fr; }
+      main { width: min(100vw - 24px, 1120px); padding-top: 20px; }
+      .table-wrap { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>土区礼品卡价格</h1>
+        <p class="meta">最近 ${escapeHtml(String(retentionDays(env)))} 天数据，最后更新：${escapeHtml(updatedAt)}</p>
+      </div>
+      <div class="actions">
+        <a class="button" href="/api/history">JSON</a>
+        <a class="button" href="/run?dry=1">试抓</a>
+        <a class="button primary" href="/run">抓取并保存</a>
+      </div>
+    </header>
+
+    <section class="cards">${latestCards}</section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>价格趋势</h2>
+        <div class="legend">${renderLegend(denoms)}</div>
+      </div>
+      <div class="chart-wrap">${chart}</div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>历史记录</h2>
+        <p class="meta">${records.length} 次抓取</p>
+      </div>
+      <div class="table-wrap">${table}</div>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function renderLatestCards(latest, denoms) {
+  return denoms.map((denom) => {
+    const price = latest?.prices?.find((item) => item.denomTl === denom);
+    if (!price) {
+      return `<article class="card"><div class="label">${denom} TL</div><div class="price">--</div><div class="sub">等待首次抓取</div></article>`;
+    }
+
+    return `<article class="card">
+      <div class="label">${denom} TL</div>
+      <div class="price">¥${formatMoney(price.priceCny)}</div>
+      <div class="sub">原价 ¥${formatMoney(price.originalPriceCny)} · 折扣 ${formatMoney(price.discountPercent)}%<br>SEAGM Credits ${price.credits}</div>
+    </article>`;
+  }).join("");
+}
+
+function renderChart(records, denoms) {
+  if (records.length === 0) {
+    return `<div class="empty">暂无数据，点击“抓取并保存”生成第一条记录。</div>`;
   }
+
+  const width = 960;
+  const height = 320;
+  const pad = { top: 22, right: 24, bottom: 42, left: 54 };
+  const values = records.flatMap((record) => record.prices.map((price) => price.priceCny));
+  const min = Math.floor(Math.min(...values) * 0.98);
+  const max = Math.ceil(Math.max(...values) * 1.02);
+  const xStep = records.length > 1
+    ? (width - pad.left - pad.right) / (records.length - 1)
+    : 0;
+  const y = (value) =>
+    pad.top + (max - value) / Math.max(1, max - min) * (height - pad.top - pad.bottom);
+  const x = (index) => pad.left + index * xStep;
+  const colors = ["#1e7c63", "#2f68b8", "#c9513e", "#a86912"];
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+    const gy = pad.top + ratio * (height - pad.top - pad.bottom);
+    const label = max - ratio * (max - min);
+    return `<line x1="${pad.left}" y1="${gy}" x2="${width - pad.right}" y2="${gy}" stroke="#d9dfd7" />
+      <text x="10" y="${gy + 4}" fill="#66706b" font-size="12">¥${formatMoney(label)}</text>`;
+  }).join("");
+
+  const lines = denoms.map((denom, colorIndex) => {
+    const points = records
+      .map((record, index) => {
+        const price = record.prices.find((item) => item.denomTl === denom);
+        return price ? `${x(index)},${y(price.priceCny)}` : null;
+      })
+      .filter(Boolean)
+      .join(" ");
+
+    return `<polyline points="${points}" fill="none" stroke="${colors[colorIndex % colors.length]}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />`;
+  }).join("");
+
+  const marks = records.map((record, index) => {
+    if (index !== 0 && index !== records.length - 1 && records.length > 8 && index % Math.ceil(records.length / 6) !== 0) {
+      return "";
+    }
+    return `<text x="${x(index)}" y="${height - 14}" fill="#66706b" font-size="12" text-anchor="middle">${formatShortDate(record.capturedAt)}</text>`;
+  }).join("");
+
+  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="SEAGM 价格趋势图">
+    <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff" />
+    ${grid}
+    ${lines}
+    ${marks}
+  </svg>`;
 }
 
-async function getGoogleAccessToken(env) {
-  const now = Math.floor(Date.now() / 1000);
-  const header = { alg: "RS256", typ: "JWT" };
-  const claim = {
-    iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    scope: GOOGLE_SHEETS_SCOPE,
-    aud: GOOGLE_TOKEN_URL,
-    exp: now + 3600,
-    iat: now,
-  };
-
-  const unsignedJwt = `${base64UrlJson(header)}.${base64UrlJson(claim)}`;
-  const signature = await signRs256(unsignedJwt, env.GOOGLE_PRIVATE_KEY);
-  const jwt = `${unsignedJwt}.${signature}`;
-
-  const response = await fetch(GOOGLE_TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: jwt,
-    }),
-  });
-
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(`Google OAuth failed: ${response.status} ${JSON.stringify(data)}`);
+function renderHistoryTable(records, denoms) {
+  if (records.length === 0) {
+    return `<div class="empty">暂无历史记录。</div>`;
   }
 
-  return data.access_token;
+  const header = denoms.map((denom) => `<th>${denom} TL</th>`).join("");
+  const rows = [...records].reverse().map((record) => {
+    const cells = denoms.map((denom) => {
+      const price = record.prices.find((item) => item.denomTl === denom);
+      return `<td>${price ? `¥${formatMoney(price.priceCny)}` : "--"}</td>`;
+    }).join("");
+
+    return `<tr>
+      <td>${escapeHtml(formatDateTime(record.capturedAt))}</td>
+      ${cells}
+      <td><a href="${escapeHtml(record.sourceUrl)}" target="_blank" rel="noreferrer">SEAGM</a></td>
+    </tr>`;
+  }).join("");
+
+  return `<table>
+    <thead><tr><th>时间</th>${header}<th>来源</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
 }
 
-async function signRs256(input, privateKeyPem) {
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    pemToArrayBuffer(privateKeyPem),
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-
-  const signature = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    key,
-    new TextEncoder().encode(input)
-  );
-
-  return base64Url(signature);
+function renderLegend(denoms) {
+  const colors = ["#1e7c63", "#2f68b8", "#c9513e", "#a86912"];
+  return denoms.map((denom, index) =>
+    `<span><i class="dot" style="background:${colors[index % colors.length]}"></i>${denom} TL</span>`
+  ).join("");
 }
 
-function pemToArrayBuffer(pem) {
-  const normalized = pem.replace(/\\n/g, "\n");
-  const base64 = normalized
-    .replace("-----BEGIN PRIVATE KEY-----", "")
-    .replace("-----END PRIVATE KEY-----", "")
-    .replace(/\s+/g, "");
-
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
-function base64UrlJson(value) {
-  return base64Url(new TextEncoder().encode(JSON.stringify(value)));
-}
-
-function base64Url(value) {
-  const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : value;
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+function latestRecord(history) {
+  return [...history].sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))[0] || null;
 }
 
 function parseDenoms(value = "500,1000,2000") {
@@ -214,10 +466,14 @@ function parseDenoms(value = "500,1000,2000") {
     .filter((item) => Number.isFinite(item) && item > 0);
 }
 
-function assertEnv(env, names) {
-  const missing = names.filter((name) => !env[name]);
-  if (missing.length > 0) {
-    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+function retentionDays(env) {
+  const value = Number(env.RETENTION_DAYS || DEFAULT_RETENTION_DAYS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_RETENTION_DAYS;
+}
+
+function assertKv(env) {
+  if (!env.PRICE_HISTORY) {
+    throw new Error("Missing Cloudflare KV binding: PRICE_HISTORY");
   }
 }
 
@@ -225,9 +481,54 @@ function round2(value) {
   return Math.round(value * 100) / 100;
 }
 
+function formatMoney(value) {
+  return Number(value).toFixed(2).replace(/\.00$/, "");
+}
+
+function formatDateTime(value) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+function formatShortDate(value) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(value));
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function html(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    },
   });
 }

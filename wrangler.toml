@@ -1,4 +1,4 @@
-name = "seagm-price-monitor"
+name = "tuerqi"
 main = "src/index.js"
 compatibility_date = "2026-05-05"
 
@@ -8,4 +8,8 @@ crons = ["0 2 * * *"]
 [vars]
 SEAGM_URL = "https://www.seagm.com/zh-cn/itunes-gift-card-turkey?item_id=16820"
 DENOMS = "500,1000,2000"
-GOOGLE_SHEET_NAME = "Prices"
+RETENTION_DAYS = "60"
+
+[[kv_namespaces]]
+binding = "PRICE_HISTORY"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
