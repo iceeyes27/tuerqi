@@ -9,3 +9,7 @@ crons = ["0 2 * * *"]
 SEAGM_URL = "https://www.seagm.com/zh-cn/itunes-gift-card-turkey?item_id=16820"
 DENOMS = "500,1000,2000"
 RETENTION_DAYS = "60"
+
+[[kv_namespaces]]
+binding = "PRICE_HISTORY"
+id = "99ec8198359743f8a4840e523d431ebc"
