@@ -655,26 +655,42 @@ function renderChart(records, denoms) {
   }
 
   const width = 960;
-  const height = 320;
-  const pad = { top: 22, right: 24, bottom: 42, left: 54 };
-  const values = records.flatMap((record) => record.prices.map((price) => price.priceCny));
-  const min = Math.floor(Math.min(...values) * 0.98);
-  const max = Math.ceil(Math.max(...values) * 1.02);
+  const rowHeight = 132;
+  const axisHeight = 34;
+  const height = denoms.length * rowHeight + axisHeight;
+  const pad = { top: 18, right: 36, bottom: 32, left: 74 };
+  const plotWidth = width - pad.left - pad.right;
   const xStep = records.length > 1
-    ? (width - pad.left - pad.right) / (records.length - 1)
+    ? plotWidth / (records.length - 1)
     : 0;
-  const y = (value) =>
-    pad.top + (max - value) / Math.max(1, max - min) * (height - pad.top - pad.bottom);
-  const x = (index) => pad.left + index * xStep;
+  const x = (index) => records.length > 1
+    ? pad.left + index * xStep
+    : pad.left + plotWidth / 2;
   const colors = ["#1e7c63", "#2f68b8", "#c9513e", "#a86912"];
-  const grid = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-    const gy = pad.top + ratio * (height - pad.top - pad.bottom);
-    const label = max - ratio * (max - min);
-    return `<line x1="${pad.left}" y1="${gy}" x2="${width - pad.right}" y2="${gy}" stroke="#d9dfd7" />
-      <text x="10" y="${gy + 4}" fill="#66706b" font-size="12">¥${formatMoney(label)}</text>`;
-  }).join("");
 
-  const lines = denoms.map((denom, colorIndex) => {
+  const rows = denoms.map((denom, colorIndex) => {
+    const values = records
+      .map((record) => record.prices.find((item) => item.denomTl === denom)?.priceCny)
+      .filter((value) => Number.isFinite(value));
+    if (values.length === 0) {
+      return "";
+    }
+
+    const color = colors[colorIndex % colors.length];
+    const top = pad.top + colorIndex * rowHeight;
+    const plotHeight = rowHeight - 36;
+    const rawMin = Math.min(...values);
+    const rawMax = Math.max(...values);
+    const padding = Math.max((rawMax - rawMin) * 0.35, 0.05);
+    const min = rawMin - padding;
+    const max = rawMax + padding;
+    const y = (value) => top + (max - value) / Math.max(0.01, max - min) * plotHeight;
+    const mid = (min + max) / 2;
+    const grid = [max, mid, min].map((label) => {
+      const gy = y(label);
+      return `<line x1="${pad.left}" y1="${gy}" x2="${width - pad.right}" y2="${gy}" stroke="#d9dfd7" />
+        <text x="12" y="${gy + 4}" fill="#66706b" font-size="12">¥${formatMoney(label)}</text>`;
+    }).join("");
     const points = records
       .map((record, index) => {
         const price = record.prices.find((item) => item.denomTl === denom);
@@ -682,21 +698,32 @@ function renderChart(records, denoms) {
       })
       .filter(Boolean)
       .join(" ");
+    const dots = records.map((record, index) => {
+      const price = record.prices.find((item) => item.denomTl === denom);
+      if (!price) {
+        return "";
+      }
+      return `<circle cx="${x(index)}" cy="${y(price.priceCny)}" r="3.4" fill="#ffffff" stroke="${color}" stroke-width="2" />`;
+    }).join("");
 
-    return `<polyline points="${points}" fill="none" stroke="${colors[colorIndex % colors.length]}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />`;
+    return `<g>
+      <text x="${pad.left}" y="${top - 4}" fill="${color}" font-size="13" font-weight="700">${denom} TL</text>
+      ${grid}
+      <polyline points="${points}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+      ${dots}
+    </g>`;
   }).join("");
 
   const marks = records.map((record, index) => {
     if (index !== 0 && index !== records.length - 1 && records.length > 8 && index % Math.ceil(records.length / 6) !== 0) {
       return "";
     }
-    return `<text x="${x(index)}" y="${height - 14}" fill="#66706b" font-size="12" text-anchor="middle">${formatShortDate(record.capturedAt)}</text>`;
+    return `<text x="${x(index)}" y="${height - 12}" fill="#66706b" font-size="12" text-anchor="middle">${formatChartTime(record.capturedAt)}</text>`;
   }).join("");
 
   return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="SEAGM 价格趋势图">
     <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff" />
-    ${grid}
-    ${lines}
+    ${rows}
     ${marks}
   </svg>`;
 }
@@ -797,11 +824,14 @@ function formatDateTime(value) {
   }).format(new Date(value));
 }
 
-function formatShortDate(value) {
+function formatChartTime(value) {
   return new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
   }).format(new Date(value));
 }
 
