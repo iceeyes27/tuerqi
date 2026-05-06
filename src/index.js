@@ -546,6 +546,24 @@ function renderDashboard(history, env) {
       min-width: 720px;
       height: auto;
     }
+    .chart-point {
+      cursor: crosshair;
+      outline: none;
+    }
+    .chart-hit {
+      fill: transparent;
+      stroke: transparent;
+      stroke-width: 16;
+      pointer-events: all;
+    }
+    .chart-point .tooltip {
+      display: none;
+      pointer-events: none;
+    }
+    .chart-point:hover .tooltip,
+    .chart-point:focus .tooltip {
+      display: block;
+    }
     .legend {
       display: flex;
       gap: 14px;
@@ -691,19 +709,32 @@ function renderChart(records, denoms) {
       return `<line x1="${pad.left}" y1="${gy}" x2="${width - pad.right}" y2="${gy}" stroke="#d9dfd7" />
         <text x="12" y="${gy + 4}" fill="#66706b" font-size="12">¥${formatMoney(label)}</text>`;
     }).join("");
-    const points = records
+    const plottedPoints = records
       .map((record, index) => {
         const price = record.prices.find((item) => item.denomTl === denom);
-        return price ? `${x(index)},${y(price.priceCny)}` : null;
+        if (!price) {
+          return null;
+        }
+        return {
+          cx: x(index),
+          cy: y(price.priceCny),
+          price: price.priceCny,
+          capturedAt: record.capturedAt,
+        };
       })
-      .filter(Boolean)
-      .join(" ");
-    const dots = records.map((record, index) => {
-      const price = record.prices.find((item) => item.denomTl === denom);
-      if (!price) {
-        return "";
-      }
-      return `<circle cx="${x(index)}" cy="${y(price.priceCny)}" r="3.4" fill="#ffffff" stroke="${color}" stroke-width="2" />`;
+      .filter(Boolean);
+    const points = plottedPoints.map((point) => `${point.cx},${point.cy}`).join(" ");
+    const dots = plottedPoints.map((point, index) => {
+      const previous = plottedPoints[index - 1];
+      const hitLine = previous
+        ? `<line class="chart-hit" x1="${previous.cx}" y1="${previous.cy}" x2="${point.cx}" y2="${point.cy}" />`
+        : "";
+      return `<g class="chart-point" tabindex="0" aria-label="${denom} TL ¥${formatMoney(point.price)} ${formatChartTime(point.capturedAt)}">
+        ${hitLine}
+        <circle class="chart-hit" cx="${point.cx}" cy="${point.cy}" r="12" />
+        <circle cx="${point.cx}" cy="${point.cy}" r="3.4" fill="#ffffff" stroke="${color}" stroke-width="2" />
+        ${renderChartTooltip(point.cx, point.cy, point.price, point.capturedAt, color, width, pad)}
+      </g>`;
     }).join("");
 
     return `<g>
@@ -726,6 +757,24 @@ function renderChart(records, denoms) {
     ${rows}
     ${marks}
   </svg>`;
+}
+
+function renderChartTooltip(cx, cy, price, capturedAt, color, width, pad) {
+  const tooltipWidth = 118;
+  const tooltipHeight = 42;
+  const gap = 10;
+  const x = cx > width - pad.right - tooltipWidth - gap
+    ? cx - tooltipWidth - gap
+    : cx + gap;
+  const y = cy < pad.top + tooltipHeight + gap
+    ? cy + gap
+    : cy - tooltipHeight - gap;
+
+  return `<g class="tooltip">
+    <rect x="${x}" y="${y}" width="${tooltipWidth}" height="${tooltipHeight}" rx="6" fill="#ffffff" stroke="${color}" stroke-width="1.4" />
+    <text x="${x + 10}" y="${y + 17}" fill="#1c2321" font-size="13" font-weight="700">¥${formatMoney(price)}</text>
+    <text x="${x + 10}" y="${y + 34}" fill="#66706b" font-size="12">${formatChartTime(capturedAt)}</text>
+  </g>`;
 }
 
 function renderHistoryTable(records, denoms) {
