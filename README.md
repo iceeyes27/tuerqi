@@ -86,10 +86,10 @@ The Cron schedule is in `wrangler.toml`:
 
 ```toml
 [triggers]
-crons = ["0 2 * * *"]
+crons = ["0 0 * * *", "0 6 * * *"]
 ```
 
-Cloudflare Cron uses UTC. `0 2 * * *` means every day at `02:00 UTC`, which is `10:00` in China Standard Time.
+Cloudflare Cron uses UTC. `0 0 * * *` and `0 6 * * *` mean every day at `00:00 UTC` and `06:00 UTC`, which are `08:00` and `14:00` in China Standard Time.
 
 ## Change Tracked Denominations
 
