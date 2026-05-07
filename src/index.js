@@ -1,5 +1,6 @@
 const HISTORY_KEY = "seagm:history:v1";
 const DEFAULT_RETENTION_DAYS = 60;
+const DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const GOOGLE_FINANCE_TRY_CNY_URL = "https://www.google.com/finance/quote/TRY-CNY";
 
 export default {
@@ -18,11 +19,12 @@ export default {
 
       if (url.pathname === "/api/history") {
         const history = await loadHistory(env);
+        const records = compactDuplicateHistory(pruneHistory(history, retentionDays(env)));
         return json({
           ok: true,
           retentionDays: retentionDays(env),
-          latest: latestRecord(history),
-          records: history,
+          latest: latestRecord(records),
+          records,
         });
       }
 
@@ -56,7 +58,7 @@ async function runMonitor(env, options = {}) {
   if (!options.dryRun) {
     const history = await loadHistory(env);
     history.push(record);
-    await saveHistory(env, pruneHistory(history, retentionDays(env)));
+    await saveHistory(env, compactDuplicateHistory(pruneHistory(history, retentionDays(env))));
   }
 
   return {
@@ -403,11 +405,51 @@ function pruneHistory(history, days) {
     .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt));
 }
 
+function compactDuplicateHistory(history) {
+  const sorted = [...history].sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt));
+  return sorted.filter((record, index) => {
+    const capturedAt = Date.parse(record.capturedAt);
+    if (!Number.isFinite(capturedAt)) {
+      return true;
+    }
+
+    const fingerprint = snapshotFingerprint(record);
+    return !sorted.slice(index + 1).some((candidate) => {
+      const candidateCapturedAt = Date.parse(candidate.capturedAt);
+      return Number.isFinite(candidateCapturedAt)
+        && candidateCapturedAt - capturedAt <= DUPLICATE_WINDOW_MS
+        && snapshotFingerprint(candidate) === fingerprint;
+    });
+  });
+}
+
+function snapshotFingerprint(record) {
+  return stableStringify({
+    sourceUrl: record.sourceUrl || "",
+    fx: record.fx || null,
+    prices: Array.isArray(record.prices) ? record.prices : [],
+  });
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableStringify(value[key])}`
+    ).join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
 function renderDashboard(history, env) {
   const denoms = parseDenoms(env.DENOMS);
-  const latest = latestRecord(history);
-  const records = pruneHistory(history, retentionDays(env));
-  const chart = renderChart(records, denoms);
+  const records = compactDuplicateHistory(pruneHistory(history, retentionDays(env)));
+  const latest = latestRecord(records);
+  const trendTabs = renderTrendTabs(records, denoms);
   const latestCards = renderLatestCards(latest, denoms);
   const table = renderHistoryTable(records, denoms);
   const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
@@ -537,7 +579,7 @@ function renderDashboard(history, env) {
       font-size: 16px;
     }
     .chart-wrap {
-      padding: 12px 16px 16px;
+      padding: 0 16px 16px;
       overflow-x: auto;
     }
     svg {
@@ -564,20 +606,49 @@ function renderDashboard(history, env) {
     .chart-point:focus .tooltip {
       display: block;
     }
-    .legend {
+    .trend-tabs {
       display: flex;
-      gap: 14px;
       flex-wrap: wrap;
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 650;
+      gap: 8px;
+      padding: 14px 16px 10px;
     }
-    .dot {
-      display: inline-block;
-      width: 9px;
-      height: 9px;
-      border-radius: 999px;
-      margin-right: 6px;
+    .trend-tabs button {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: #fbfcf9;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    .trend-tabs button.active {
+      border-color: currentColor;
+      background: var(--panel);
+    }
+    .trend-panels {
+      border-top: 1px solid var(--line);
+    }
+    .trend-panel {
+      display: none;
+    }
+    .trend-panel.active {
+      display: block;
+    }
+    .trend-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding: 12px 16px 0;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .trend-summary strong {
+      color: var(--ink);
     }
     table {
       width: 100%;
@@ -631,9 +702,8 @@ function renderDashboard(history, env) {
     <section class="panel">
       <div class="panel-head">
         <h2>价格趋势</h2>
-        <div class="legend">${renderLegend(denoms)}</div>
       </div>
-      <div class="chart-wrap">${chart}</div>
+      ${trendTabs}
     </section>
 
     <section class="panel">
@@ -644,6 +714,23 @@ function renderDashboard(history, env) {
       <div class="table-wrap">${table}</div>
     </section>
   </main>
+  <script>
+    document.querySelectorAll("[data-trend-tabs]").forEach((tabs) => {
+      const buttons = [...tabs.querySelectorAll("[data-trend-tab]")];
+      const panelRoot = tabs.nextElementSibling;
+      const panels = panelRoot ? [...panelRoot.querySelectorAll("[data-trend-panel]")] : [];
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => {
+          buttons.forEach((item) => {
+            const active = item === button;
+            item.classList.toggle("active", active);
+            item.setAttribute("aria-selected", String(active));
+          });
+          panels.forEach((panel) => panel.classList.toggle("active", panel.id === button.getAttribute("aria-controls")));
+        });
+      });
+    });
+  </script>
 </body>
 </html>`;
 }
@@ -667,81 +754,113 @@ function renderLatestCards(latest, denoms) {
   }).join("");
 }
 
-function renderChart(records, denoms) {
+function renderTrendTabs(records, denoms) {
+  if (records.length === 0) {
+    return `<div class="empty">暂无数据，点击“抓取并保存”生成第一条记录。</div>`;
+  }
+
+  const colors = ["#1e7c63", "#2f68b8", "#c9513e", "#a86912"];
+  const tabs = denoms.map((denom, index) => {
+    const active = index === 0 ? " active" : "";
+    const selected = index === 0 ? "true" : "false";
+    const color = colors[index % colors.length];
+    return `<button class="${active}" type="button" role="tab" aria-selected="${selected}" aria-controls="trend-panel-${index}" data-trend-tab style="color:${color}">${denom} TL</button>`;
+  }).join("");
+  const panels = denoms.map((denom, index) => {
+    const color = colors[index % colors.length];
+    const active = index === 0 ? " active" : "";
+    return `<div id="trend-panel-${index}" class="trend-panel${active}" role="tabpanel" data-trend-panel>
+      ${renderTrendSummary(records, denom)}
+      <div class="chart-wrap">${renderChart(records, denom, color)}</div>
+    </div>`;
+  }).join("");
+
+  return `<div class="trend-tabs" role="tablist" aria-label="价格趋势面额" data-trend-tabs>${tabs}</div>
+    <div class="trend-panels">${panels}</div>`;
+}
+
+function renderTrendSummary(records, denom) {
+  const values = records
+    .map((record) => record.prices.find((item) => item.denomTl === denom)?.priceCny)
+    .filter((value) => Number.isFinite(value));
+
+  if (values.length === 0) {
+    return `<div class="trend-summary"><span>暂无 ${denom} TL 数据</span></div>`;
+  }
+
+  const latest = values[values.length - 1];
+  const first = values[0];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const change = round2(latest - first);
+
+  return `<div class="trend-summary">
+    <span>最新 <strong>¥${formatMoney(latest)}</strong></span>
+    <span>区间 <strong>¥${formatMoney(min)} - ¥${formatMoney(max)}</strong></span>
+    <span>较首条 <strong>${formatSignedMoney(change)}</strong></span>
+  </div>`;
+}
+
+function renderChart(records, denom, color) {
   if (records.length === 0) {
     return `<div class="empty">暂无数据，点击“抓取并保存”生成第一条记录。</div>`;
   }
 
   const width = 960;
-  const rowHeight = 132;
-  const axisHeight = 34;
-  const height = denoms.length * rowHeight + axisHeight;
-  const pad = { top: 18, right: 36, bottom: 32, left: 74 };
+  const height = 300;
+  const pad = { top: 30, right: 36, bottom: 38, left: 74 };
   const plotWidth = width - pad.left - pad.right;
+  const plotHeight = height - pad.top - pad.bottom;
   const xStep = records.length > 1
     ? plotWidth / (records.length - 1)
     : 0;
   const x = (index) => records.length > 1
     ? pad.left + index * xStep
     : pad.left + plotWidth / 2;
-  const colors = ["#1e7c63", "#2f68b8", "#c9513e", "#a86912"];
+  const values = records
+    .map((record) => record.prices.find((item) => item.denomTl === denom)?.priceCny)
+    .filter((value) => Number.isFinite(value));
 
-  const rows = denoms.map((denom, colorIndex) => {
-    const values = records
-      .map((record) => record.prices.find((item) => item.denomTl === denom)?.priceCny)
-      .filter((value) => Number.isFinite(value));
-    if (values.length === 0) {
-      return "";
-    }
+  if (values.length === 0) {
+    return `<div class="empty">暂无 ${denom} TL 数据。</div>`;
+  }
 
-    const color = colors[colorIndex % colors.length];
-    const top = pad.top + colorIndex * rowHeight;
-    const plotHeight = rowHeight - 36;
-    const rawMin = Math.min(...values);
-    const rawMax = Math.max(...values);
-    const padding = Math.max((rawMax - rawMin) * 0.35, 0.05);
-    const min = rawMin - padding;
-    const max = rawMax + padding;
-    const y = (value) => top + (max - value) / Math.max(0.01, max - min) * plotHeight;
-    const mid = (min + max) / 2;
-    const grid = [max, mid, min].map((label) => {
-      const gy = y(label);
-      return `<line x1="${pad.left}" y1="${gy}" x2="${width - pad.right}" y2="${gy}" stroke="#d9dfd7" />
-        <text x="12" y="${gy + 4}" fill="#66706b" font-size="12">¥${formatMoney(label)}</text>`;
-    }).join("");
-    const plottedPoints = records
-      .map((record, index) => {
-        const price = record.prices.find((item) => item.denomTl === denom);
-        if (!price) {
-          return null;
-        }
-        return {
-          cx: x(index),
-          cy: y(price.priceCny),
-          price: price.priceCny,
-          capturedAt: record.capturedAt,
-        };
-      })
-      .filter(Boolean);
-    const points = plottedPoints.map((point) => `${point.cx},${point.cy}`).join(" ");
-    const dots = plottedPoints.map((point, index) => {
-      const previous = plottedPoints[index - 1];
-      const hitLine = previous
-        ? `<line class="chart-hit" x1="${previous.cx}" y1="${previous.cy}" x2="${point.cx}" y2="${point.cy}" />`
-        : "";
-      return `<g class="chart-point" tabindex="0" aria-label="${denom} TL ¥${formatMoney(point.price)} ${formatChartTime(point.capturedAt)}">
-        ${hitLine}
-        <circle class="chart-hit" cx="${point.cx}" cy="${point.cy}" r="12" />
-        <circle cx="${point.cx}" cy="${point.cy}" r="3.4" fill="#ffffff" stroke="${color}" stroke-width="2" />
-        ${renderChartTooltip(point.cx, point.cy, point.price, point.capturedAt, color, width, pad)}
-      </g>`;
-    }).join("");
-
-    return `<g>
-      <text x="${pad.left}" y="${top - 4}" fill="${color}" font-size="13" font-weight="700">${denom} TL</text>
-      ${grid}
-      <polyline points="${points}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
-      ${dots}
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const padding = Math.max((rawMax - rawMin) * 0.25, 0.05);
+  const min = rawMin - padding;
+  const max = rawMax + padding;
+  const y = (value) => pad.top + (max - value) / Math.max(0.01, max - min) * plotHeight;
+  const grid = [max, (min + max) / 2, min].map((label) => {
+    const gy = y(label);
+    return `<line x1="${pad.left}" y1="${gy}" x2="${width - pad.right}" y2="${gy}" stroke="#d9dfd7" />
+      <text x="12" y="${gy + 4}" fill="#66706b" font-size="12">¥${formatMoney(label)}</text>`;
+  }).join("");
+  const plottedPoints = records
+    .map((record, index) => {
+      const price = record.prices.find((item) => item.denomTl === denom);
+      if (!price) {
+        return null;
+      }
+      return {
+        cx: x(index),
+        cy: y(price.priceCny),
+        price: price.priceCny,
+        capturedAt: record.capturedAt,
+      };
+    })
+    .filter(Boolean);
+  const points = plottedPoints.map((point) => `${point.cx},${point.cy}`).join(" ");
+  const dots = plottedPoints.map((point, index) => {
+    const previous = plottedPoints[index - 1];
+    const hitLine = previous
+      ? `<line class="chart-hit" x1="${previous.cx}" y1="${previous.cy}" x2="${point.cx}" y2="${point.cy}" />`
+      : "";
+    return `<g class="chart-point" tabindex="0" aria-label="${denom} TL ¥${formatMoney(point.price)} ${formatChartTime(point.capturedAt)}">
+      ${hitLine}
+      <circle class="chart-hit" cx="${point.cx}" cy="${point.cy}" r="12" />
+      <circle cx="${point.cx}" cy="${point.cy}" r="4" fill="#ffffff" stroke="${color}" stroke-width="2.3" />
+      ${renderChartTooltip(point.cx, point.cy, point.price, point.capturedAt, color, width, pad)}
     </g>`;
   }).join("");
 
@@ -754,7 +873,10 @@ function renderChart(records, denoms) {
 
   return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="SEAGM 价格趋势图">
     <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff" />
-    ${rows}
+    <text x="${pad.left}" y="18" fill="${color}" font-size="13" font-weight="700">${denom} TL</text>
+    ${grid}
+    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+    ${dots}
     ${marks}
   </svg>`;
 }
@@ -806,13 +928,6 @@ function renderHistoryTable(records, denoms) {
     <thead><tr><th>时间</th>${header}<th>来源</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
-}
-
-function renderLegend(denoms) {
-  const colors = ["#1e7c63", "#2f68b8", "#c9513e", "#a86912"];
-  return denoms.map((denom, index) =>
-    `<span><i class="dot" style="background:${colors[index % colors.length]}"></i>${denom} TL</span>`
-  ).join("");
 }
 
 function latestRecord(history) {

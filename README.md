@@ -130,6 +130,7 @@ https://tuerqi.littlelittlepony.workers.dev/run?dry=1
 
 - The Worker reads the Chinese/CNY SEAGM page directly.
 - It records the displayed discounted CNY price, not an inferred FX conversion.
+- When saving, duplicate snapshots with identical source, FX, and price data inside a 6-hour window are compacted so only the latest copy remains.
 - Data is stored in Cloudflare KV under `seagm:history:v1`.
 
 Relevant docs:
