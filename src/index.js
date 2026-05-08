@@ -122,6 +122,11 @@ async function fetchWithTimeout(url, init, timeoutMs) {
 }
 
 function extractGoogleTryCnyRate(pageHtml) {
+  const serializedPair = extractGoogleSerializedTryCnyRate(pageHtml);
+  if (Number.isFinite(serializedPair)) {
+    return serializedPair;
+  }
+
   const dataLastPrice = pageHtml.match(/data-last-price="([0-9.]+)"/);
   if (dataLastPrice) {
     return Number(dataLastPrice[1]);
@@ -138,6 +143,21 @@ function extractGoogleTryCnyRate(pageHtml) {
   }
 
   return NaN;
+}
+
+function extractGoogleSerializedTryCnyRate(pageHtml) {
+  const numberPattern = "([0-9]+(?:\\.[0-9]+)?(?:E[+-]?\\d+)?)";
+  const pairAfterRate = new RegExp(
+    `,\\s*${numberPattern}\\s*,\\s*"TRY\\s*/\\s*CNY"\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\[\\s*"TRY"\\s*,\\s*"CNY"`,
+    "i",
+  );
+  const pairBeforeRate = new RegExp(
+    `"TRY\\s*/\\s*CNY"\\s*,\\s*\\d+\\s*,\\s*null\\s*,\\s*\\[\\s*${numberPattern}`,
+    "i",
+  );
+
+  const match = pageHtml.match(pairAfterRate) || pageHtml.match(pairBeforeRate);
+  return match ? Number(match[1]) : NaN;
 }
 
 function enrichPricesWithGoogleReference(prices, fx) {
