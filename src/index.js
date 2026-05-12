@@ -883,6 +883,14 @@ function renderChart(records, denom, color) {
       ${renderChartTooltip(point.cx, point.cy, point.price, point.capturedAt, color, width, pad)}
     </g>`;
   }).join("");
+  const extremaLabels = plottedPoints.map((point) => {
+    const isHighest = point.price === rawMax;
+    const isLowest = point.price === rawMin;
+    if (!isHighest && !isLowest) {
+      return "";
+    }
+    return renderChartExtremumLabel(point, { isHighest, isLowest }, color, width, height, pad);
+  }).join("");
 
   const marks = records.map((record, index) => {
     if (index !== 0 && index !== records.length - 1 && records.length > 8 && index % Math.ceil(records.length / 6) !== 0) {
@@ -897,8 +905,37 @@ function renderChart(records, denom, color) {
     ${grid}
     <polyline points="${points}" fill="none" stroke="${color}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
     ${dots}
+    ${extremaLabels}
     ${marks}
   </svg>`;
+}
+
+function renderChartExtremumLabel(point, state, color, width, height, pad) {
+  const label = state.isHighest && state.isLowest
+    ? "最高/最低"
+    : state.isHighest
+      ? "最高"
+      : "最低";
+  const text = `${label} ¥${formatMoney(point.price)}`;
+  const labelWidth = Math.max(state.isHighest && state.isLowest ? 98 : 78, text.length * 9);
+  const labelHeight = 24;
+  const gap = 10;
+  const x = Math.min(
+    Math.max(point.cx - labelWidth / 2, pad.left),
+    width - pad.right - labelWidth,
+  );
+  const preferAbove = state.isHighest;
+  const canPlaceBelow = point.cy + gap + labelHeight <= height - pad.bottom - 4;
+  const y = preferAbove || !canPlaceBelow
+    ? Math.max(pad.top, point.cy - labelHeight - gap)
+    : point.cy + gap;
+  const placedAbove = y < point.cy;
+
+  return `<g aria-label="${text}" pointer-events="none">
+    <line x1="${point.cx}" y1="${point.cy}" x2="${point.cx}" y2="${placedAbove ? y + labelHeight : y}" stroke="${color}" stroke-width="1.2" stroke-dasharray="3 3" />
+    <rect x="${x}" y="${y}" width="${labelWidth}" height="${labelHeight}" rx="6" fill="#ffffff" stroke="${color}" stroke-width="1.4" />
+    <text x="${x + labelWidth / 2}" y="${y + 16}" fill="${color}" font-size="12" font-weight="750" text-anchor="middle">${text}</text>
+  </g>`;
 }
 
 function renderChartTooltip(cx, cy, price, capturedAt, color, width, pad) {
