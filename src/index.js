@@ -1,7 +1,10 @@
 const HISTORY_KEY = "seagm:history:v1";
 const DEFAULT_RETENTION_DAYS = 60;
 const DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
-const GOOGLE_FINANCE_TRY_CNY_URL = "https://www.google.com/finance/quote/TRY-CNY";
+const GOOGLE_FINANCE_TRY_CNY_URLS = [
+  "https://www.google.com/finance/quote/TRY-CNY",
+  "https://www.google.com/finance/beta/quote/TRY-CNY",
+];
 
 export default {
   async scheduled(event, env, ctx) {
@@ -69,46 +72,55 @@ async function runMonitor(env, options = {}) {
 }
 
 async function fetchGoogleFxSnapshot(denoms) {
-  try {
-    const response = await fetchWithTimeout(GOOGLE_FINANCE_TRY_CNY_URL, {
-      headers: {
-        "accept": "text/html,application/xhtml+xml",
-        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "user-agent": "Mozilla/5.0 seagm-price-monitor/2.0",
-      },
-    }, 8000);
+  for (const sourceUrl of GOOGLE_FINANCE_TRY_CNY_URLS) {
+    try {
+      const response = await fetchWithTimeout(sourceUrl, {
+        headers: {
+          "accept": "text/html,application/xhtml+xml",
+          "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+          "user-agent": "Mozilla/5.0 seagm-price-monitor/2.0",
+        },
+        redirect: "manual",
+      }, 8000);
 
-    if (!response.ok) {
-      throw new Error(`Google Finance request failed: ${response.status} ${response.statusText}`);
+      if (response.status >= 300 && response.status < 400) {
+        throw new Error(`Google Finance redirect blocked: ${response.status}`);
+      }
+
+      if (!response.ok) {
+        throw new Error(`Google Finance request failed: ${response.status} ${response.statusText}`);
+      }
+
+      const pageHtml = await response.text();
+      const rateCnyPerTry = extractGoogleTryCnyRate(pageHtml);
+      if (!Number.isFinite(rateCnyPerTry) || rateCnyPerTry <= 0) {
+        throw new Error("Could not parse Google Finance TRY/CNY rate");
+      }
+
+      return {
+        ok: true,
+        source: "Google Finance",
+        sourceUrl,
+        pair: "TRY/CNY",
+        rateCnyPerTry,
+        prices: denoms.map((denomTl) => ({
+          denomTl,
+          priceCny: round2(denomTl * rateCnyPerTry),
+        })),
+      };
+    } catch {
+      continue;
     }
-
-    const pageHtml = await response.text();
-    const rateCnyPerTry = extractGoogleTryCnyRate(pageHtml);
-    if (!Number.isFinite(rateCnyPerTry) || rateCnyPerTry <= 0) {
-      throw new Error("Could not parse Google Finance TRY/CNY rate");
-    }
-
-    return {
-      ok: true,
-      source: "Google Finance",
-      sourceUrl: GOOGLE_FINANCE_TRY_CNY_URL,
-      pair: "TRY/CNY",
-      rateCnyPerTry,
-      prices: denoms.map((denomTl) => ({
-        denomTl,
-        priceCny: round2(denomTl * rateCnyPerTry),
-      })),
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      source: "Google Finance",
-      sourceUrl: GOOGLE_FINANCE_TRY_CNY_URL,
-      pair: "TRY/CNY",
-      error: error?.message || String(error),
-      prices: [],
-    };
   }
+
+  return {
+    ok: false,
+    source: "Google Finance",
+    sourceUrl: GOOGLE_FINANCE_TRY_CNY_URLS[0],
+    pair: "TRY/CNY",
+    error: "Google Finance unavailable",
+    prices: [],
+  };
 }
 
 async function fetchWithTimeout(url, init, timeoutMs) {
@@ -764,7 +776,7 @@ function renderLatestCards(latest, denoms) {
 
     const googleLine = Number.isFinite(price.googlePriceCny)
       ? `Google ¥${formatMoney(price.googlePriceCny)} · 差额 ${formatSignedMoney(price.googlePremiumCny)} · ${formatSignedPercent(price.googlePremiumPercent)}`
-      : `Google 汇率暂无${latest?.fx?.error ? ` · ${escapeHtml(latest.fx.error)}` : ""}`;
+      : "Google 汇率暂无";
 
     return `<article class="card">
       <div class="label">${denom} TL</div>
