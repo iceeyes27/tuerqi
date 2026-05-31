@@ -1,6 +1,17 @@
 const HISTORY_KEY = "seagm:history:v1";
 const DEFAULT_RETENTION_DAYS = 60;
+const DEFAULT_MAX_HISTORY_RECORDS = 500;
 const DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
+const READ_CACHE_TTL_SECONDS = 60;
+const NO_STORE = "no-store";
+const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}`;
+const SECURITY_HEADERS = {
+  "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "permissions-policy": "geolocation=(), microphone=(), camera=(), payment=()",
+};
 const GOOGLE_FINANCE_TRY_CNY_URLS = [
   "https://www.google.com/finance/quote/TRY-CNY",
   "https://www.google.com/finance/beta/quote/TRY-CNY",
@@ -8,49 +19,81 @@ const GOOGLE_FINANCE_TRY_CNY_URLS = [
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runMonitor(env));
+    ctx.waitUntil(runScheduledMonitor(env));
   },
 
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     try {
       if (url.pathname === "/") {
-        const history = await loadHistory(env);
-        return html(renderDashboard(history, env));
+        return cachedResponse(request, ctx, async () => {
+          const history = await loadHistory(env);
+          return html(renderDashboard(history, env), 200, READ_CACHE_CONTROL);
+        });
       }
 
       if (url.pathname === "/api/history") {
-        const history = await loadHistory(env);
-        const records = compactDuplicateHistory(pruneHistory(history, retentionDays(env)));
-        return json({
-          ok: true,
-          retentionDays: retentionDays(env),
-          latest: latestRecord(records),
-          records,
+        return cachedResponse(request, ctx, async () => {
+          const history = await loadHistory(env);
+          const records = normalizeHistory(history, env);
+          return json({
+            ok: true,
+            retentionDays: retentionDays(env),
+            maxHistoryRecords: maxHistoryRecords(env),
+            latest: latestRecord(records),
+            records,
+          }, 200, READ_CACHE_CONTROL);
         });
       }
 
       if (url.pathname === "/run") {
         const dryRun = url.searchParams.get("dry") === "1";
-        const result = await runMonitor(env, { dryRun });
+        if (!dryRun && !isAuthorizedRun(request, env)) {
+          return json({ ok: false, error: "Forbidden" }, 403);
+        }
+
+        const result = await runMonitor(env, { dryRun, source: "manual" });
+        if (!dryRun) {
+          await purgeReadCache(request);
+        }
         return json(result);
       }
 
       return json({ ok: false, error: "Not found" }, 404);
     } catch (error) {
+      console.error("Worker request failed", {
+        path: url.pathname,
+        error: error.message,
+      });
       return json({ ok: false, error: error.message }, 500);
     }
   },
 };
 
+async function runScheduledMonitor(env) {
+  try {
+    const result = await runMonitor(env, { source: "scheduled" });
+    console.log("Scheduled price monitor completed", {
+      capturedAt: result.record.capturedAt,
+      priceCount: result.record.prices.length,
+      fxOk: Boolean(result.record.fx?.ok),
+    });
+  } catch (error) {
+    console.error("Scheduled price monitor failed", { error: error.message });
+    throw error;
+  }
+}
+
 async function runMonitor(env, options = {}) {
   assertKv(env);
 
-  const html = await fetchSeagmHtml(env.SEAGM_URL);
   const denoms = parseDenoms(env.DENOMS);
-  const fx = await fetchGoogleFxSnapshot(denoms);
-  const prices = enrichPricesWithGoogleReference(extractPrices(html, denoms), fx);
+  const [pageHtml, fx] = await Promise.all([
+    fetchSeagmHtml(env.SEAGM_URL),
+    fetchGoogleFxSnapshot(denoms),
+  ]);
+  const prices = enrichPricesWithGoogleReference(extractPrices(pageHtml, denoms), fx);
   const record = {
     capturedAt: new Date().toISOString(),
     sourceUrl: env.SEAGM_URL,
@@ -61,8 +104,16 @@ async function runMonitor(env, options = {}) {
   if (!options.dryRun) {
     const history = await loadHistory(env);
     history.push(record);
-    await saveHistory(env, compactDuplicateHistory(pruneHistory(history, retentionDays(env))));
+    await saveHistory(env, normalizeHistory(history, env));
   }
+
+  console.log("Price monitor completed", {
+    source: options.source || "unknown",
+    dryRun: Boolean(options.dryRun),
+    capturedAt: record.capturedAt,
+    priceCount: prices.length,
+    fxOk: Boolean(fx?.ok),
+  });
 
   return {
     ok: true,
@@ -430,11 +481,23 @@ async function saveHistory(env, history) {
   await env.PRICE_HISTORY.put(HISTORY_KEY, JSON.stringify(history));
 }
 
+function normalizeHistory(history, env) {
+  return limitHistory(compactDuplicateHistory(pruneHistory(history, retentionDays(env))), maxHistoryRecords(env));
+}
+
 function pruneHistory(history, days) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   return history
     .filter((record) => Date.parse(record.capturedAt) >= cutoff)
     .sort((a, b) => Date.parse(a.capturedAt) - Date.parse(b.capturedAt));
+}
+
+function limitHistory(history, maxRecords) {
+  if (!Number.isFinite(maxRecords) || maxRecords <= 0 || history.length <= maxRecords) {
+    return history;
+  }
+
+  return history.slice(history.length - maxRecords);
 }
 
 function compactDuplicateHistory(history) {
@@ -725,7 +788,6 @@ function renderDashboard(history, env) {
       <div class="actions">
         <a class="button" href="/api/history">JSON</a>
         <a class="button" href="/run?dry=1">试抓</a>
-        <a class="button primary" href="/run">抓取并保存</a>
       </div>
     </header>
 
@@ -1015,6 +1077,11 @@ function retentionDays(env) {
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_RETENTION_DAYS;
 }
 
+function maxHistoryRecords(env) {
+  const value = Number(env.MAX_HISTORY_RECORDS || DEFAULT_MAX_HISTORY_RECORDS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_MAX_HISTORY_RECORDS;
+}
+
 function assertKv(env) {
   if (!env.PRICE_HISTORY) {
     throw new Error("Missing Cloudflare KV binding: PRICE_HISTORY");
@@ -1076,22 +1143,69 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body, null, 2), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
+function isAuthorizedRun(request, env) {
+  const token = env.RUN_TOKEN;
+  if (!token) {
+    return false;
+  }
+
+  const url = new URL(request.url);
+  const queryToken = url.searchParams.get("token");
+  const auth = request.headers.get("authorization") || "";
+  const bearerToken = auth.match(/^Bearer\s+(.+)$/i)?.[1];
+  return queryToken === token || bearerToken === token;
 }
 
-function html(body, status = 200) {
-  return new Response(body, {
-    status,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
+function cacheKeyFor(url, pathname) {
+  return new Request(new URL(pathname, url.origin).toString(), { method: "GET" });
+}
+
+async function cachedResponse(request, ctx, createResponse) {
+  if (request.method !== "GET") {
+    return createResponse();
+  }
+
+  const cache = caches.default;
+  const cacheKey = cacheKeyFor(new URL(request.url), new URL(request.url).pathname);
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const response = await createResponse();
+  if (response.ok) {
+    ctx.waitUntil(cache.put(cacheKey, response.clone()));
+  }
+  return response;
+}
+
+async function purgeReadCache(request) {
+  const url = new URL(request.url);
+  await Promise.all([
+    caches.default.delete(cacheKeyFor(url, "/")),
+    caches.default.delete(cacheKeyFor(url, "/api/history")),
+  ]);
+}
+
+function withSecurityHeaders(headers) {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    headers.set(name, value);
+  }
+  return headers;
+}
+
+function json(body, status = 200, cacheControl = NO_STORE) {
+  const headers = withSecurityHeaders(new Headers({
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": cacheControl,
+  }));
+  return new Response(JSON.stringify(body, null, 2), { status, headers });
+}
+
+function html(body, status = 200, cacheControl = NO_STORE) {
+  const headers = withSecurityHeaders(new Headers({
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": cacheControl,
+  }));
+  return new Response(body, { status, headers });
 }

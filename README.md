@@ -16,7 +16,7 @@ Each run stores one snapshot:
 captured_at, source_url, prices[]
 ```
 
-The dashboard keeps the latest `60` days by default.
+The dashboard keeps the latest `60` days by default, capped at `500` records.
 
 ## Cloudflare KV Setup
 
@@ -56,10 +56,11 @@ Dry run without writing to KV:
 curl 'http://localhost:8787/run?dry=1'
 ```
 
-Run and save to KV:
+Run and save to KV locally with a token:
 
 ```sh
-curl 'http://localhost:8787/run'
+npx wrangler dev --var RUN_TOKEN:local-dev-token
+curl 'http://localhost:8787/run?token=local-dev-token'
 ```
 
 Open the dashboard:
@@ -67,6 +68,24 @@ Open the dashboard:
 ```text
 http://localhost:8787/
 ```
+
+## Manual Run Protection
+
+`/run?dry=1` is public and does not write to KV. A real `/run` write requires a `RUN_TOKEN` secret so visitors cannot mutate production history:
+
+```sh
+npx wrangler secret put RUN_TOKEN
+```
+
+Manual production write examples:
+
+```sh
+curl -H 'Authorization: Bearer <RUN_TOKEN>' 'https://tuerqi.littlelittlepony.workers.dev/run'
+# or
+curl 'https://tuerqi.littlelittlepony.workers.dev/run?token=<RUN_TOKEN>'
+```
+
+Cloudflare Cron writes do not need this token.
 
 ## Deploy To Cloudflare Workers
 
@@ -114,10 +133,10 @@ JSON history:
 https://tuerqi.littlelittlepony.workers.dev/api/history
 ```
 
-Manual scrape and save:
+Manual scrape and save with token:
 
 ```text
-https://tuerqi.littlelittlepony.workers.dev/run
+https://tuerqi.littlelittlepony.workers.dev/run?token=<RUN_TOKEN>
 ```
 
 Manual scrape without saving:
@@ -132,6 +151,8 @@ https://tuerqi.littlelittlepony.workers.dev/run?dry=1
 - It records the displayed discounted CNY price, not an inferred FX conversion.
 - When saving, duplicate snapshots with identical source, FX, and price data inside a 6-hour window are compacted so only the latest copy remains.
 - Data is stored in Cloudflare KV under `seagm:history:v1`.
+- `/` and `/api/history` are cached at the Cloudflare edge for 60 seconds to reduce KV reads and HTML/SVG rendering work.
+- History is pruned by both `RETENTION_DAYS` and `MAX_HISTORY_RECORDS` to keep the KV value bounded.
 
 Relevant docs:
 
