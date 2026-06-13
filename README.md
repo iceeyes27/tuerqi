@@ -1,8 +1,13 @@
-# SEAGM Price Monitor
+# Price Monitor
 
-Cloudflare Worker Cron job for tracking SEAGM Turkey iTunes gift card CNY prices. Data is stored in Cloudflare KV and shown directly on the Worker page.
+Cloudflare Worker Cron job that tracks two CNY price series and shows them on the Worker page:
 
-## What It Captures
+- **`/` (default) — 尼日利亚 Claude**: the Claude Pro monthly App Store price in Nigeria (14,900 NGN), converted to CNY, sourced from [App Store Price](https://appstoreprice.org/zh/apps/6473753684). Captured once per day (one point per Asia/Shanghai calendar day).
+- **`/turkey` — 土区礼品卡**: SEAGM Turkey iTunes gift card CNY prices, compared against the Google Finance TRY/CNY rate.
+
+Both pages share a top nav so you can switch between them. Data is stored in Cloudflare KV and rendered directly by the Worker.
+
+## What It Captures (Turkey)
 
 Default denominations:
 
@@ -127,9 +132,16 @@ Production dashboard:
 https://tuerqi.littlelittlepony.workers.dev/
 ```
 
-JSON history:
+Turkey page:
 
 ```text
+https://tuerqi.littlelittlepony.workers.dev/turkey
+```
+
+JSON history (Nigeria / Turkey):
+
+```text
+https://tuerqi.littlelittlepony.workers.dev/api/nigeria
 https://tuerqi.littlelittlepony.workers.dev/api/history
 ```
 
@@ -147,11 +159,11 @@ https://tuerqi.littlelittlepony.workers.dev/run?dry=1
 
 ## Notes
 
-- The Worker reads the Chinese/CNY SEAGM page directly.
-- It records the displayed discounted CNY price, not an inferred FX conversion.
-- When saving, duplicate snapshots with identical source, FX, and price data inside a 6-hour window are compacted so only the latest copy remains.
-- Data is stored in Cloudflare KV under `seagm:history:v1`.
-- `/` and `/api/history` are cached at the Cloudflare edge for 60 seconds to reduce KV reads and HTML/SVG rendering work.
+- Nigeria: the Worker parses the embedded JSON on the App Store Price page and records the site's daily `priceCny` for the 14,900 NGN Claude Pro monthly tier. Only one record is kept per Asia/Shanghai day (a later read the same day overwrites the earlier one).
+- Turkey: the Worker reads the Chinese/CNY SEAGM page directly and records the displayed discounted CNY price, not an inferred FX conversion.
+- When saving Turkey snapshots, duplicates with identical source, FX, and price data inside a 6-hour window are compacted so only the latest copy remains.
+- Data is stored in Cloudflare KV under `appstore:ng-claude:v1` (Nigeria) and `seagm:history:v1` (Turkey).
+- `/`, `/turkey`, `/api/nigeria`, and `/api/history` are cached at the Cloudflare edge for 60 seconds to reduce KV reads and HTML/SVG rendering work.
 - History is pruned by both `RETENTION_DAYS` and `MAX_HISTORY_RECORDS` to keep the KV value bounded.
 
 Relevant docs:
