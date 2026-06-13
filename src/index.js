@@ -1143,11 +1143,16 @@ function renderNigeriaChart(records, color) {
     return `<text x="${x(index)}" y="${height - 10}" fill="#8a948e" font-size="12" text-anchor="middle">${formatMonthDay(record.capturedAt)}</text>`;
   }).join("");
 
+  // With only one or two days of data there is no visible line, so render solid
+  // dots; for longer ranges keep the clean line and reveal a dot on hover only.
+  const showDots = count <= 2;
+  const dotRadius = showDots ? "4.5" : "3.4";
+  const dotOpacity = showDots ? "1" : "0";
   const hover = points.map((point) => {
     const half = count > 1 ? plotWidth / (count - 1) / 2 : plotWidth / 2;
     return `<g class="ng-point" tabindex="0" aria-label="${formatDay(point.capturedAt)} ¥${formatMoney(point.price)}">
       <rect class="ng-hit" x="${(point.cx - half).toFixed(2)}" y="${pad.top}" width="${(half * 2).toFixed(2)}" height="${plotHeight}" />
-      <circle cx="${point.cx.toFixed(2)}" cy="${point.cy.toFixed(2)}" r="3.4" fill="#ffffff" stroke="${color}" stroke-width="2" opacity="0" />
+      <circle cx="${point.cx.toFixed(2)}" cy="${point.cy.toFixed(2)}" r="${dotRadius}" fill="#ffffff" stroke="${color}" stroke-width="2.4" opacity="${dotOpacity}" />
       ${renderNigeriaTooltip(point, color, width, pad)}
     </g>`;
   }).join("");
