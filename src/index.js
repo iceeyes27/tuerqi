@@ -750,6 +750,14 @@ const NAV_STYLE = `
       color: #ffffff;
     }`;
 
+const CHART_STYLE = `
+    svg.trend { display: block; width: 100%; min-width: 640px; height: auto; }
+    .ng-point { outline: none; }
+    .ng-hit { fill: transparent; pointer-events: all; }
+    .ng-point .tooltip { display: none; pointer-events: none; }
+    .ng-point:hover .tooltip,
+    .ng-point:focus .tooltip { display: block; }`;
+
 function renderNav(active) {
   const items = [
     { href: "/", label: "尼日利亚 Claude", key: "nigeria" },
@@ -836,17 +844,7 @@ function renderNigeriaDashboard(history, env) {
     .chart-body {
       padding: 18px 18px 8px;
       overflow-x: auto;
-    }
-    svg.trend {
-      display: block;
-      width: 100%;
-      min-width: 640px;
-      height: auto;
-    }
-    .ng-point .tooltip { display: none; pointer-events: none; }
-    .ng-point:hover .tooltip, .ng-point:focus .tooltip { display: block; }
-    .ng-point { outline: none; }
-    .ng-hit { fill: transparent; pointer-events: all; }
+    }${CHART_STYLE}
     .cards {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1098,8 +1096,24 @@ function renderNigeriaCards(records, env) {
 }
 
 function renderNigeriaChart(records, color) {
-  if (records.length === 0) {
-    return `<div class="empty">暂无数据，等待首次抓取生成第一条记录。</div>`;
+  const points = records
+    .map((record) => ({ price: Number(record.priceCny), capturedAt: record.capturedAt }))
+    .filter((point) => Number.isFinite(point.price));
+  return renderTrendChart(points, color, "trend-ng", {
+    ariaLabel: "尼日利亚 Claude 人民币价格走势",
+    emptyText: "暂无数据，等待首次抓取生成第一条记录。",
+  });
+}
+
+// Shared area-style trend chart used by both the Nigeria and Turkey pages.
+// `points` is an array of { price, capturedAt }; `gradientId` must be unique per
+// chart on the page so multiple charts don't share one gradient definition.
+function renderTrendChart(points, color, gradientId, options = {}) {
+  const ariaLabel = options.ariaLabel || "价格趋势图";
+  const emptyText = options.emptyText || "暂无数据。";
+  const tooltipDate = options.tooltipDate || formatDay;
+  if (points.length === 0) {
+    return `<div class="empty">${emptyText}</div>`;
   }
 
   const width = 960;
@@ -1108,10 +1122,10 @@ function renderNigeriaChart(records, color) {
   const plotWidth = width - pad.left - pad.right;
   const plotHeight = height - pad.top - pad.bottom;
   const baseline = pad.top + plotHeight;
-  const count = records.length;
+  const count = points.length;
   const x = (index) => count > 1 ? pad.left + (index / (count - 1)) * plotWidth : pad.left + plotWidth / 2;
 
-  const values = records.map((record) => Number(record.priceCny));
+  const values = points.map((point) => point.price);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   const padding = Math.max((rawMax - rawMin) * 0.2, 0.05);
@@ -1126,53 +1140,53 @@ function renderNigeriaChart(records, color) {
       <text x="${pad.left - 12}" y="${gy + 4}" fill="#8a948e" font-size="12" text-anchor="end">¥${formatMoney(label)}</text>`;
   }).join("");
 
-  const points = records.map((record, index) => ({
+  const plotted = points.map((point, index) => ({
     cx: x(index),
-    cy: y(Number(record.priceCny)),
-    price: Number(record.priceCny),
-    capturedAt: record.capturedAt,
+    cy: y(point.price),
+    price: point.price,
+    capturedAt: point.capturedAt,
   }));
-  const line = points.map((point) => `${point.cx.toFixed(2)},${point.cy.toFixed(2)}`).join(" ");
-  const area = `${points[0].cx.toFixed(2)},${baseline} ${line} ${points[points.length - 1].cx.toFixed(2)},${baseline}`;
+  const line = plotted.map((point) => `${point.cx.toFixed(2)},${point.cy.toFixed(2)}`).join(" ");
+  const area = `${plotted[0].cx.toFixed(2)},${baseline} ${line} ${plotted[plotted.length - 1].cx.toFixed(2)},${baseline}`;
 
   const labelEvery = Math.max(1, Math.ceil(count / 6));
-  const axis = records.map((record, index) => {
+  const axis = plotted.map((point, index) => {
     if (index !== 0 && index !== count - 1 && index % labelEvery !== 0) {
       return "";
     }
-    return `<text x="${x(index)}" y="${height - 10}" fill="#8a948e" font-size="12" text-anchor="middle">${formatMonthDay(record.capturedAt)}</text>`;
+    return `<text x="${point.cx.toFixed(2)}" y="${height - 10}" fill="#8a948e" font-size="12" text-anchor="middle">${formatMonthDay(point.capturedAt)}</text>`;
   }).join("");
 
-  // With only one or two days of data there is no visible line, so render solid
-  // dots; for longer ranges keep the clean line and reveal a dot on hover only.
+  // With only one or two points there is no visible line, so render solid dots;
+  // for longer ranges keep the clean line and reveal a dot on hover only.
   const showDots = count <= 2;
   const dotRadius = showDots ? "4.5" : "3.4";
   const dotOpacity = showDots ? "1" : "0";
-  const hover = points.map((point) => {
+  const hover = plotted.map((point) => {
     const half = count > 1 ? plotWidth / (count - 1) / 2 : plotWidth / 2;
-    return `<g class="ng-point" tabindex="0" aria-label="${formatDay(point.capturedAt)} ¥${formatMoney(point.price)}">
+    return `<g class="ng-point" tabindex="0" aria-label="${tooltipDate(point.capturedAt)} ¥${formatMoney(point.price)}">
       <rect class="ng-hit" x="${(point.cx - half).toFixed(2)}" y="${pad.top}" width="${(half * 2).toFixed(2)}" height="${plotHeight}" />
       <circle cx="${point.cx.toFixed(2)}" cy="${point.cy.toFixed(2)}" r="${dotRadius}" fill="#ffffff" stroke="${color}" stroke-width="2.4" opacity="${dotOpacity}" />
-      ${renderNigeriaTooltip(point, color, width, pad)}
+      ${renderTrendTooltip(point, color, width, pad, tooltipDate)}
     </g>`;
   }).join("");
 
-  return `<svg class="trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="尼日利亚 Claude 人民币价格走势">
+  return `<svg class="trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="${ariaLabel}">
     <defs>
-      <linearGradient id="ng-fill" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id="${gradientId}" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${color}" stop-opacity="0.28" />
         <stop offset="100%" stop-color="${color}" stop-opacity="0.02" />
       </linearGradient>
     </defs>
     ${grid}
-    <polygon points="${area}" fill="url(#ng-fill)" stroke="none" />
+    <polygon points="${area}" fill="url(#${gradientId})" stroke="none" />
     <polyline points="${line}" fill="none" stroke="${color}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
     ${axis}
     ${hover}
   </svg>`;
 }
 
-function renderNigeriaTooltip(point, color, width, pad) {
+function renderTrendTooltip(point, color, width, pad, tooltipDate = formatDay) {
   const tooltipWidth = 124;
   const tooltipHeight = 44;
   const gap = 10;
@@ -1182,11 +1196,11 @@ function renderNigeriaTooltip(point, color, width, pad) {
   const y = Math.max(pad.top, point.cy - tooltipHeight - gap);
 
   return `<g class="tooltip">
-    <line x1="${point.cx.toFixed(2)}" y1="${pad.top}" x2="${point.cx.toFixed(2)}" y2="${(pad.top + (point.cy - pad.top)).toFixed(2)}" stroke="${color}" stroke-width="1" stroke-dasharray="3 3" stroke-opacity="0.5" />
+    <line x1="${point.cx.toFixed(2)}" y1="${pad.top}" x2="${point.cx.toFixed(2)}" y2="${point.cy.toFixed(2)}" stroke="${color}" stroke-width="1" stroke-dasharray="3 3" stroke-opacity="0.5" />
     <circle cx="${point.cx.toFixed(2)}" cy="${point.cy.toFixed(2)}" r="4" fill="#ffffff" stroke="${color}" stroke-width="2.2" />
     <rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${tooltipWidth}" height="${tooltipHeight}" rx="8" fill="#ffffff" stroke="${color}" stroke-width="1.3" />
     <text x="${(x + 12).toFixed(2)}" y="${(y + 18).toFixed(2)}" fill="#1c2321" font-size="13" font-weight="750">¥${formatMoney(point.price)}</text>
-    <text x="${(x + 12).toFixed(2)}" y="${(y + 35).toFixed(2)}" fill="#66706b" font-size="12">${formatDay(point.capturedAt)}</text>
+    <text x="${(x + 12).toFixed(2)}" y="${(y + 35).toFixed(2)}" fill="#66706b" font-size="12">${tooltipDate(point.capturedAt)}</text>
   </g>`;
 }
 
@@ -1324,33 +1338,9 @@ function renderDashboard(history, env) {
       font-size: 16px;
     }
     .chart-wrap {
-      padding: 0 16px 16px;
+      padding: 16px 16px 8px;
       overflow-x: auto;
-    }
-    svg {
-      display: block;
-      width: 100%;
-      min-width: 720px;
-      height: auto;
-    }
-    .chart-point {
-      cursor: crosshair;
-      outline: none;
-    }
-    .chart-hit {
-      fill: transparent;
-      stroke: transparent;
-      stroke-width: 16;
-      pointer-events: all;
-    }
-    .chart-point .tooltip {
-      display: none;
-      pointer-events: none;
-    }
-    .chart-point:hover .tooltip,
-    .chart-point:focus .tooltip {
-      display: block;
-    }
+    }${CHART_STYLE}
     .trend-tabs {
       display: flex;
       flex-wrap: wrap;
@@ -1516,7 +1506,7 @@ function renderTrendTabs(records, denoms) {
     const active = index === 0 ? " active" : "";
     return `<div id="trend-panel-${index}" class="trend-panel${active}" role="tabpanel" data-trend-panel>
       ${renderTrendSummary(records, denom)}
-      <div class="chart-wrap">${renderChart(records, denom, color)}</div>
+      <div class="chart-wrap">${renderChart(records, denom, color, index)}</div>
     </div>`;
   }).join("");
 
@@ -1546,139 +1536,20 @@ function renderTrendSummary(records, denom) {
   </div>`;
 }
 
-function renderChart(records, denom, color) {
-  if (records.length === 0) {
-    return `<div class="empty">暂无数据，点击“抓取并保存”生成第一条记录。</div>`;
-  }
-
-  const width = 960;
-  const height = 300;
-  const pad = { top: 30, right: 36, bottom: 38, left: 74 };
-  const plotWidth = width - pad.left - pad.right;
-  const plotHeight = height - pad.top - pad.bottom;
-  const xStep = records.length > 1
-    ? plotWidth / (records.length - 1)
-    : 0;
-  const x = (index) => records.length > 1
-    ? pad.left + index * xStep
-    : pad.left + plotWidth / 2;
-  const values = records
-    .map((record) => record.prices.find((item) => item.denomTl === denom)?.priceCny)
-    .filter((value) => Number.isFinite(value));
-
-  if (values.length === 0) {
-    return `<div class="empty">暂无 ${denom} TL 数据。</div>`;
-  }
-
-  const rawMin = Math.min(...values);
-  const rawMax = Math.max(...values);
-  const padding = Math.max((rawMax - rawMin) * 0.25, 0.05);
-  const min = rawMin - padding;
-  const max = rawMax + padding;
-  const y = (value) => pad.top + (max - value) / Math.max(0.01, max - min) * plotHeight;
-  const grid = [max, (min + max) / 2, min].map((label) => {
-    const gy = y(label);
-    return `<line x1="${pad.left}" y1="${gy}" x2="${width - pad.right}" y2="${gy}" stroke="#d9dfd7" />
-      <text x="12" y="${gy + 4}" fill="#66706b" font-size="12">¥${formatMoney(label)}</text>`;
-  }).join("");
-  const plottedPoints = records
-    .map((record, index) => {
+function renderChart(records, denom, color, index = 0) {
+  const points = records
+    .map((record) => {
       const price = record.prices.find((item) => item.denomTl === denom);
-      if (!price) {
-        return null;
-      }
-      return {
-        cx: x(index),
-        cy: y(price.priceCny),
-        price: price.priceCny,
-        capturedAt: record.capturedAt,
-      };
+      return price && Number.isFinite(Number(price.priceCny))
+        ? { price: Number(price.priceCny), capturedAt: record.capturedAt }
+        : null;
     })
     .filter(Boolean);
-  const points = plottedPoints.map((point) => `${point.cx},${point.cy}`).join(" ");
-  const dots = plottedPoints.map((point, index) => {
-    const previous = plottedPoints[index - 1];
-    const hitLine = previous
-      ? `<line class="chart-hit" x1="${previous.cx}" y1="${previous.cy}" x2="${point.cx}" y2="${point.cy}" />`
-      : "";
-    return `<g class="chart-point" tabindex="0" aria-label="${denom} TL ¥${formatMoney(point.price)} ${formatChartTime(point.capturedAt)}">
-      ${hitLine}
-      <circle class="chart-hit" cx="${point.cx}" cy="${point.cy}" r="12" />
-      <circle cx="${point.cx}" cy="${point.cy}" r="4" fill="#ffffff" stroke="${color}" stroke-width="2.3" />
-      ${renderChartTooltip(point.cx, point.cy, point.price, point.capturedAt, color, width, pad)}
-    </g>`;
-  }).join("");
-  const extremaLabels = plottedPoints.map((point) => {
-    const isHighest = point.price === rawMax;
-    const isLowest = point.price === rawMin;
-    if (!isHighest && !isLowest) {
-      return "";
-    }
-    return renderChartExtremumLabel(point, { isHighest, isLowest }, color, width, height, pad);
-  }).join("");
-
-  const marks = records.map((record, index) => {
-    if (index !== 0 && index !== records.length - 1 && records.length > 8 && index % Math.ceil(records.length / 6) !== 0) {
-      return "";
-    }
-    return `<text x="${x(index)}" y="${height - 12}" fill="#66706b" font-size="12" text-anchor="middle">${formatChartTime(record.capturedAt)}</text>`;
-  }).join("");
-
-  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="SEAGM 价格趋势图">
-    <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff" />
-    <text x="${pad.left}" y="18" fill="${color}" font-size="13" font-weight="700">${denom} TL</text>
-    ${grid}
-    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
-    ${dots}
-    ${extremaLabels}
-    ${marks}
-  </svg>`;
-}
-
-function renderChartExtremumLabel(point, state, color, width, height, pad) {
-  const label = state.isHighest && state.isLowest
-    ? "最高/最低"
-    : state.isHighest
-      ? "最高"
-      : "最低";
-  const text = `${label} ¥${formatMoney(point.price)}`;
-  const labelWidth = Math.max(state.isHighest && state.isLowest ? 98 : 78, text.length * 9);
-  const labelHeight = 24;
-  const gap = 10;
-  const x = Math.min(
-    Math.max(point.cx - labelWidth / 2, pad.left),
-    width - pad.right - labelWidth,
-  );
-  const preferAbove = state.isHighest;
-  const canPlaceBelow = point.cy + gap + labelHeight <= height - pad.bottom - 4;
-  const y = preferAbove || !canPlaceBelow
-    ? Math.max(pad.top, point.cy - labelHeight - gap)
-    : point.cy + gap;
-  const placedAbove = y < point.cy;
-
-  return `<g aria-label="${text}" pointer-events="none">
-    <line x1="${point.cx}" y1="${point.cy}" x2="${point.cx}" y2="${placedAbove ? y + labelHeight : y}" stroke="${color}" stroke-width="1.2" stroke-dasharray="3 3" />
-    <rect x="${x}" y="${y}" width="${labelWidth}" height="${labelHeight}" rx="6" fill="#ffffff" stroke="${color}" stroke-width="1.4" />
-    <text x="${x + labelWidth / 2}" y="${y + 16}" fill="${color}" font-size="12" font-weight="750" text-anchor="middle">${text}</text>
-  </g>`;
-}
-
-function renderChartTooltip(cx, cy, price, capturedAt, color, width, pad) {
-  const tooltipWidth = 118;
-  const tooltipHeight = 42;
-  const gap = 10;
-  const x = cx > width - pad.right - tooltipWidth - gap
-    ? cx - tooltipWidth - gap
-    : cx + gap;
-  const y = cy < pad.top + tooltipHeight + gap
-    ? cy + gap
-    : cy - tooltipHeight - gap;
-
-  return `<g class="tooltip">
-    <rect x="${x}" y="${y}" width="${tooltipWidth}" height="${tooltipHeight}" rx="6" fill="#ffffff" stroke="${color}" stroke-width="1.4" />
-    <text x="${x + 10}" y="${y + 17}" fill="#1c2321" font-size="13" font-weight="700">¥${formatMoney(price)}</text>
-    <text x="${x + 10}" y="${y + 34}" fill="#66706b" font-size="12">${formatChartTime(capturedAt)}</text>
-  </g>`;
+  return renderTrendChart(points, color, `trend-tk-${index}`, {
+    ariaLabel: `${denom} TL 价格趋势`,
+    emptyText: `暂无 ${denom} TL 数据。`,
+    tooltipDate: formatChartTime,
+  });
 }
 
 function renderHistoryTable(records, denoms) {
