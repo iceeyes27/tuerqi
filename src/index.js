@@ -142,6 +142,7 @@ async function runNigeriaMonitor(env, options = {}) {
     priceNgn: parsed.priceNgn,
     priceCny: parsed.priceCny,
     priceUsd: parsed.priceUsd,
+    fx: extractNigeriaFx(pageHtml),
   };
 
   if (!options.dryRun) {
@@ -205,6 +206,33 @@ function extractNigeriaClaudePrice(pageHtml) {
   // Claude Pro monthly sits on the 14,900 NGN tier; fall back to the cheapest plan.
   const pro = entries.find((entry) => entry.priceNgn === 14900);
   return pro || entries.reduce((lowest, entry) => (entry.priceCny < lowest.priceCny ? entry : lowest));
+}
+
+// Pulls the source's USD-based FX table + data date so the page can show the
+// exchange-rate context behind each CNY price.
+function extractNigeriaFx(pageHtml) {
+  const matchNumber = (escaped, plain) => {
+    const match = pageHtml.match(escaped) || pageHtml.match(plain);
+    return match ? Number(match[1]) : NaN;
+  };
+  const matchString = (escaped, plain) => {
+    const match = pageHtml.match(escaped) || pageHtml.match(plain);
+    return match ? match[1] : null;
+  };
+
+  const usdToCny = matchNumber(/\\"CNY\\":([0-9][0-9.]*)/, /"CNY":([0-9][0-9.]*)/);
+  const usdToNgn = matchNumber(/\\"NGN\\":([0-9][0-9.]*)/, /"NGN":([0-9][0-9.]*)/);
+  if (!Number.isFinite(usdToCny) || usdToCny <= 0 || !Number.isFinite(usdToNgn) || usdToNgn <= 0) {
+    return null;
+  }
+
+  return {
+    date: matchString(/\\"date\\":\\"(\d{4}-\d{2}-\d{2})\\"/, /"date":"(\d{4}-\d{2}-\d{2})"/),
+    updatedAt: matchString(/\\"time_last_update\\":\\"([^"\\]+)\\"/, /"time_last_update":"([^"]+)"/),
+    usdToCny: round2dp(usdToCny, 6),
+    usdToNgn: round2dp(usdToNgn, 6),
+    ngnToCny: round2dp(usdToCny / usdToNgn, 8),
+  };
 }
 
 async function loadNigeriaHistory(env) {
@@ -847,15 +875,77 @@ function renderNigeriaDashboard(history, env) {
     .card .value.up { color: var(--green); }
     .card .sub { margin-top: 12px; color: var(--muted); font-size: 13px; }
     .empty { padding: 60px 16px; text-align: center; color: var(--muted); }
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 22px;
+    }
+    .top .nav { margin-bottom: 0; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      min-height: 38px;
+      padding: 0 16px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--ink);
+      text-decoration: none;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn.primary { background: var(--green); border-color: var(--green); color: #ffffff; }
+    .btn:disabled { opacity: 0.6; cursor: default; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      margin-top: 16px;
+      overflow: hidden;
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .panel-head h2 { margin: 0; font-size: 16px; font-weight: 760; }
+    .phead-meta { margin: 0; color: var(--muted); font-size: 13px; }
+    .rates { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .rate-item { padding: 16px 18px; border-right: 1px solid var(--line); }
+    .rate-item:last-child { border-right: 0; }
+    .rate-item .label { color: var(--muted); font-size: 13px; font-weight: 650; }
+    .rate-item .value { margin-top: 8px; font-size: 22px; font-weight: 780; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 11px 16px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th { color: var(--muted); font-size: 12px; background: #fbfcf9; font-weight: 700; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .table-wrap { overflow-x: auto; }
     @media (max-width: 760px) {
       .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .rates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .rate-item:nth-child(2) { border-right: 0; }
       main { width: min(100vw - 24px, 1120px); padding-top: 20px; }
     }
   </style>
 </head>
 <body>
   <main>
-    ${renderNav("nigeria")}
+    <div class="top">
+      ${renderNav("nigeria")}
+      <div class="actions">
+        <button class="btn primary" type="button" data-scrape>手动抓取</button>
+        <a class="btn" href="/api/nigeria">JSON</a>
+      </div>
+    </div>
     <section class="chart-card">
       <div class="chart-card-head">
         <span class="chart-icon" aria-hidden="true">
@@ -867,10 +957,106 @@ function renderNigeriaDashboard(history, env) {
     </section>
 
     <section class="cards">${cards}</section>
+    ${renderNigeriaRates(latest)}
+    ${renderNigeriaHistory(records)}
     <p class="meta">Claude Pro 月度订阅 · 数据来源 <a href="${escapeHtml(env.APPSTORE_URL || DEFAULT_APPSTORE_URL)}" target="_blank" rel="noreferrer">App Store Price</a> · 每日更新 · 最后更新：${escapeHtml(updatedAt)}</p>
   </main>
+  <script>
+    const scrapeBtn = document.querySelector("[data-scrape]");
+    scrapeBtn?.addEventListener("click", async () => {
+      let token = localStorage.getItem("ng_run_token") || "";
+      if (!token) {
+        token = (window.prompt("请输入 RUN_TOKEN（用于授权写入数据）") || "").trim();
+        if (!token) return;
+        localStorage.setItem("ng_run_token", token);
+      }
+      const original = scrapeBtn.textContent;
+      scrapeBtn.disabled = true;
+      scrapeBtn.textContent = "抓取中…";
+      try {
+        const res = await fetch("/run?token=" + encodeURIComponent(token), { method: "GET" });
+        if (res.status === 403) {
+          localStorage.removeItem("ng_run_token");
+          window.alert("RUN_TOKEN 无效，请重新输入");
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (data && data.nigeria && data.nigeria.ok) {
+          window.location.reload();
+          return;
+        }
+        const reason = (data && data.errors && JSON.stringify(data.errors)) || (data && data.error) || ("HTTP " + res.status);
+        window.alert("抓取失败：" + reason);
+      } catch (error) {
+        window.alert("请求出错：" + error.message);
+      } finally {
+        scrapeBtn.disabled = false;
+        scrapeBtn.textContent = original;
+      }
+    });
+  </script>
 </body>
 </html>`;
+}
+
+function renderNigeriaRates(latest) {
+  if (!latest) {
+    return `<section class="panel">
+      <div class="panel-head"><h2>汇率情况</h2></div>
+      <div class="empty">暂无数据，等待首次抓取。</div>
+    </section>`;
+  }
+
+  const fx = latest.fx || null;
+  const cnyToNgn = Number(latest.priceCny) > 0
+    ? round2(Number(latest.priceNgn) / Number(latest.priceCny))
+    : null;
+  const rateItem = (label, value) =>
+    `<div class="rate-item"><div class="label">${label}</div><div class="value">${value}</div></div>`;
+
+  const items = [
+    rateItem("Claude Pro 美元价", Number.isFinite(Number(latest.priceUsd)) ? `$${formatMoney(latest.priceUsd)}` : "--"),
+    rateItem("1 美元 ≈ 人民币", fx?.usdToCny ? `¥${formatMoney(fx.usdToCny)}` : "--"),
+    rateItem("1 美元 ≈ 奈拉", fx?.usdToNgn ? `₦${formatInteger(Math.round(fx.usdToNgn))}` : "--"),
+    rateItem("1 人民币 ≈ 奈拉", cnyToNgn ? `₦${formatMoney(cnyToNgn)}` : "--"),
+  ].join("");
+
+  const dataDate = fx?.date ? `汇率日期 ${escapeHtml(fx.date)}` : "";
+
+  return `<section class="panel">
+    <div class="panel-head"><h2>汇率情况</h2><p class="phead-meta">${dataDate}</p></div>
+    <div class="rates">${items}</div>
+  </section>`;
+}
+
+function renderNigeriaHistory(records) {
+  if (records.length === 0) {
+    return `<section class="panel">
+      <div class="panel-head"><h2>历史记录</h2></div>
+      <div class="empty">暂无历史记录。</div>
+    </section>`;
+  }
+
+  const rows = [...records].reverse().map((record) => {
+    const cnyToNgn = Number(record.priceCny) > 0
+      ? round2(Number(record.priceNgn) / Number(record.priceCny))
+      : null;
+    return `<tr>
+      <td>${escapeHtml(formatDay(record.capturedAt))}</td>
+      <td>¥${formatMoney(record.priceCny)}</td>
+      <td>${Number.isFinite(Number(record.priceUsd)) ? `$${formatMoney(record.priceUsd)}` : "--"}</td>
+      <td>${cnyToNgn ? `₦${formatMoney(cnyToNgn)}` : "--"}</td>
+      <td><a href="${escapeHtml(record.sourceUrl)}" target="_blank" rel="noreferrer">App Store</a></td>
+    </tr>`;
+  }).join("");
+
+  return `<section class="panel">
+    <div class="panel-head"><h2>历史记录</h2><p class="phead-meta">${records.length} 天</p></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>日期</th><th>人民币</th><th>美元</th><th>1 元 ≈ 奈拉</th><th>来源</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </section>`;
 }
 
 function renderNigeriaCards(records, env) {
@@ -1550,6 +1736,11 @@ function assertKv(env) {
 
 function round2(value) {
   return Math.round(value * 100) / 100;
+}
+
+function round2dp(value, decimals) {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
 }
 
 function formatMoney(value) {
