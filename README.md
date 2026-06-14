@@ -2,7 +2,7 @@
 
 Cloudflare Worker Cron job that tracks two CNY price series and shows them on the Worker page:
 
-- **`/` (default) — 尼日利亚 Claude**: the Claude Pro monthly App Store price in Nigeria (14,900 NGN), converted to CNY, sourced from [App Store Price](https://appstoreprice.org/zh/apps/6473753684). Captured once per day (one point per Asia/Shanghai calendar day).
+- **`/` (default) — 尼日利亚订阅**: monthly App Store subscription prices in Nigeria, converted to CNY, sourced from [App Store Price](https://appstoreprice.org/zh). Tracks Claude Pro, YouTube Premium (单人 / 家庭), and Spotify (个人 / 家庭). Each subscription gets its own trend tab, current-price card, and history column. Captured once per day (one point per Asia/Shanghai calendar day).
 - **`/turkey` — 土区礼品卡**: SEAGM Turkey iTunes gift card CNY prices, compared against the Google Finance TRY/CNY rate.
 
 Both pages share a top nav so you can switch between them. Data is stored in Cloudflare KV and rendered directly by the Worker.
@@ -159,7 +159,7 @@ https://tuerqi.littlelittlepony.workers.dev/run?dry=1
 
 ## Notes
 
-- Nigeria: the Worker parses the embedded JSON on the App Store Price page and records the site's daily `priceCny` for the 14,900 NGN Claude Pro monthly tier. Only one record is kept per Asia/Shanghai day (a later read the same day overwrites the earlier one).
+- Nigeria: the Worker parses the embedded JSON on each App Store Price page and records the site's daily NG `priceCny` for every tracked monthly subscription (matched by plan name). Subscriptions are defined in `nigeriaItems()` in `src/index.js`. Only one record is kept per Asia/Shanghai day (a later read the same day overwrites the earlier one), and each record holds all subscriptions under an `items` map. Legacy single-Claude records are migrated to this shape on read.
 - Turkey: the Worker reads the Chinese/CNY SEAGM page directly and records the displayed discounted CNY price, not an inferred FX conversion.
 - When saving Turkey snapshots, duplicates with identical source, FX, and price data inside a 6-hour window are compacted so only the latest copy remains.
 - Data is stored in Cloudflare KV under `appstore:ng-claude:v1` (Nigeria) and `seagm:history:v1` (Turkey).

@@ -1,7 +1,19 @@
 const HISTORY_KEY = "seagm:history:v1";
 const NIGERIA_HISTORY_KEY = "appstore:ng-claude:v1";
 const DEFAULT_APPSTORE_URL = "https://appstoreprice.org/zh/apps/6473753684";
-const NIGERIA_PLAN_LABEL = "Claude Pro · 月度订阅";
+const NIGERIA_APPSTORE_BASE = "https://appstoreprice.org/zh/apps/";
+
+// Subscriptions tracked on the Nigeria page. `plan` must equal the App Store
+// Price plan name (matched case-insensitively) and `duration` its billing period.
+function nigeriaItems(env) {
+  return [
+    { key: "claude-pro", label: "Claude Pro 月度", short: "Claude", url: env.APPSTORE_URL || DEFAULT_APPSTORE_URL, plan: "Claude Pro - Monthly", duration: "monthly", color: "#2bb673" },
+    { key: "youtube-solo", label: "YouTube Premium 单人", short: "YT 单人", url: `${NIGERIA_APPSTORE_BASE}544007664`, plan: "YouTube Premium", duration: "monthly", color: "#e0513b" },
+    { key: "youtube-family", label: "YouTube Premium 家庭", short: "YT 家庭", url: `${NIGERIA_APPSTORE_BASE}544007664`, plan: "YouTube Premium Family", duration: "monthly", color: "#c0392b" },
+    { key: "spotify-solo", label: "Spotify 个人", short: "Spotify 个人", url: `${NIGERIA_APPSTORE_BASE}spotify`, plan: "Premium Individual", duration: "monthly", color: "#1db954" },
+    { key: "spotify-family", label: "Spotify 家庭", short: "Spotify 家庭", url: `${NIGERIA_APPSTORE_BASE}spotify`, plan: "Premium Family", duration: "monthly", color: "#157a3a" },
+  ];
+}
 const DEFAULT_RETENTION_DAYS = 60;
 const DEFAULT_MAX_HISTORY_RECORDS = 500;
 const DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
@@ -49,6 +61,7 @@ export default {
           return json({
             ok: true,
             retentionDays: retentionDays(env),
+            items: nigeriaItems(env).map(({ key, label, plan, url }) => ({ key, label, plan, url })),
             latest: latestRecord(records),
             records,
           }, 200, READ_CACHE_CONTROL);
@@ -127,22 +140,40 @@ async function runAllMonitors(env, options = {}) {
 async function runNigeriaMonitor(env, options = {}) {
   assertKv(env);
 
-  const sourceUrl = env.APPSTORE_URL || DEFAULT_APPSTORE_URL;
-  const pageHtml = await fetchAppStoreHtml(sourceUrl);
-  const parsed = extractNigeriaClaudePrice(pageHtml);
-  if (!parsed) {
-    throw new Error("Could not parse Nigeria Claude price from App Store Price page");
+  const items = nigeriaItems(env);
+  const urls = [...new Set(items.map((item) => item.url))];
+  const pages = new Map(
+    await Promise.all(urls.map(async (url) => [url, await fetchAppStoreHtml(url)])),
+  );
+
+  let fx = null;
+  const prices = {};
+  const missing = [];
+  for (const item of items) {
+    const pageHtml = pages.get(item.url);
+    if (!fx) {
+      fx = extractNigeriaFx(pageHtml);
+    }
+    const parsed = extractNigeriaPlanPrice(pageHtml, item.plan, item.duration);
+    if (parsed) {
+      prices[item.key] = {
+        priceNgn: parsed.priceNgn,
+        priceUsd: parsed.priceUsd,
+        priceCny: parsed.priceCny,
+      };
+    } else {
+      missing.push(item.key);
+    }
+  }
+
+  if (Object.keys(prices).length === 0) {
+    throw new Error(`Could not parse any Nigeria prices from App Store Price (missing: ${missing.join(", ")})`);
   }
 
   const record = {
     capturedAt: new Date().toISOString(),
-    sourceUrl,
-    plan: NIGERIA_PLAN_LABEL,
-    currency: "NGN",
-    priceNgn: parsed.priceNgn,
-    priceCny: parsed.priceCny,
-    priceUsd: parsed.priceUsd,
-    fx: extractNigeriaFx(pageHtml),
+    fx,
+    items: prices,
   };
 
   if (!options.dryRun) {
@@ -154,10 +185,11 @@ async function runNigeriaMonitor(env, options = {}) {
     source: options.source || "unknown",
     dryRun: Boolean(options.dryRun),
     capturedAt: record.capturedAt,
-    priceCny: record.priceCny,
+    itemCount: Object.keys(prices).length,
+    missing,
   });
 
-  return { ok: true, dryRun: Boolean(options.dryRun), record };
+  return { ok: true, dryRun: Boolean(options.dryRun), record, missing };
 }
 
 async function fetchAppStoreHtml(url) {
@@ -176,36 +208,59 @@ async function fetchAppStoreHtml(url) {
   return response.text();
 }
 
-function extractNigeriaClaudePrice(pageHtml) {
-  // The page embeds Next.js RSC-escaped JSON, e.g.
-  //   \"region\":\"NG\",\"regionName\":\"尼日利亚\",\"currency\":\"NGN\",\"price\":14900,\"priceUsd\":10.96,\"priceCny\":74.38
-  // Fall back to plain (unescaped) JSON in case the embedding format changes.
-  const escaped = /\\"region\\":\\"NG\\",\\"regionName\\":\\"[^"\\]*\\",\\"currency\\":\\"NGN\\",\\"price\\":([0-9.]+),\\"priceUsd\\":([0-9.]+),\\"priceCny\\":([0-9.]+)/g;
-  const plain = /"region":"NG","regionName":"[^"]*","currency":"NGN","price":([0-9.]+),"priceUsd":([0-9.]+),"priceCny":([0-9.]+)/g;
+// Pulls the Nigeria (NG/NGN) price for a single subscription plan. The page
+// embeds Next.js RSC-escaped JSON where each plan is one object keyed by
+// `subscriptionId`, e.g.
+//   \"subscriptionId\":\"...\",\"name\":\"YouTube Premium\",...,\"duration\":\"monthly\",...,
+//   \"prices\":[{\"region\":\"NG\",...,\"currency\":\"NGN\",\"price\":2200,\"priceUsd\":1.62,\"priceCny\":10.97}, ...]
+// Falls back to plain (unescaped) JSON in case the embedding format changes.
+function extractNigeriaPlanPrice(pageHtml, planName, duration = "monthly") {
+  const variants = [
+    {
+      split: '\\"subscriptionId\\":',
+      name: /^\\"[^"\\]*\\",\\"name\\":\\"([^"\\]+)\\"/,
+      duration: /\\"duration\\":\\"([^"\\]+)\\"/,
+      ng: /\\"region\\":\\"NG\\",\\"regionName\\":\\"[^"\\]*\\",\\"currency\\":\\"NGN\\",\\"price\\":([0-9.]+),\\"priceUsd\\":([0-9.]+),\\"priceCny\\":([0-9.]+)/,
+    },
+    {
+      split: '"subscriptionId":',
+      name: /^"[^"]*","name":"([^"]+)"/,
+      duration: /"duration":"([^"]+)"/,
+      ng: /"region":"NG","regionName":"[^"]*","currency":"NGN","price":([0-9.]+),"priceUsd":([0-9.]+),"priceCny":([0-9.]+)/,
+    },
+  ];
 
-  const entries = [];
-  for (const re of [escaped, plain]) {
-    let match;
-    while ((match = re.exec(pageHtml))) {
-      const priceNgn = Number(match[1]);
-      const priceUsd = Number(match[2]);
-      const priceCny = Number(match[3]);
+  const target = planName.toLowerCase();
+  for (const variant of variants) {
+    const blocks = pageHtml.split(variant.split);
+    if (blocks.length < 2) {
+      continue;
+    }
+
+    for (const block of blocks.slice(1)) {
+      const nameMatch = block.match(variant.name);
+      if (!nameMatch || nameMatch[1].toLowerCase() !== target) {
+        continue;
+      }
+
+      const durationMatch = block.match(variant.duration);
+      if (duration && durationMatch && durationMatch[1] !== duration) {
+        continue;
+      }
+
+      const ng = block.match(variant.ng);
+      if (!ng) {
+        continue;
+      }
+
+      const priceCny = Number(ng[3]);
       if (Number.isFinite(priceCny) && priceCny > 0) {
-        entries.push({ priceNgn, priceUsd, priceCny });
+        return { priceNgn: Number(ng[1]), priceUsd: Number(ng[2]), priceCny };
       }
     }
-    if (entries.length) {
-      break;
-    }
   }
 
-  if (!entries.length) {
-    return null;
-  }
-
-  // Claude Pro monthly sits on the 14,900 NGN tier; fall back to the cheapest plan.
-  const pro = entries.find((entry) => entry.priceNgn === 14900);
-  return pro || entries.reduce((lowest, entry) => (entry.priceCny < lowest.priceCny ? entry : lowest));
+  return null;
 }
 
 // Pulls the source's USD-based FX table + data date so the page can show the
@@ -246,10 +301,40 @@ async function saveNigeriaHistory(env, history) {
 }
 
 function normalizeNigeriaHistory(history, env) {
-  return limitHistory(
-    pruneHistory(history.filter((record) => Number.isFinite(Number(record?.priceCny))), retentionDays(env)),
-    maxHistoryRecords(env),
-  );
+  const records = history
+    .map(migrateNigeriaRecord)
+    .filter((record) => record && hasNigeriaPrice(record));
+  return limitHistory(pruneHistory(records, retentionDays(env)), maxHistoryRecords(env));
+}
+
+function hasNigeriaPrice(record) {
+  return Object.values(record.items || {}).some((price) => Number.isFinite(Number(price?.priceCny)));
+}
+
+// Upgrades the legacy single-Claude shape ({ priceNgn, priceCny, priceUsd })
+// to the multi-item shape ({ items: { "claude-pro": {...} } }) so old KV data
+// keeps rendering after the multi-subscription change.
+function migrateNigeriaRecord(record) {
+  if (!record || typeof record !== "object") {
+    return null;
+  }
+  if (record.items && typeof record.items === "object") {
+    return record;
+  }
+  if (!Number.isFinite(Number(record.priceCny))) {
+    return null;
+  }
+  return {
+    capturedAt: record.capturedAt,
+    fx: record.fx || null,
+    items: {
+      "claude-pro": {
+        priceNgn: Number(record.priceNgn),
+        priceUsd: Number(record.priceUsd),
+        priceCny: Number(record.priceCny),
+      },
+    },
+  };
 }
 
 // Keep at most one record per calendar day (Asia/Shanghai); a later read on the
@@ -758,9 +843,66 @@ const CHART_STYLE = `
     .ng-point:hover .tooltip,
     .ng-point:focus .tooltip { display: block; }`;
 
+// Tabbed trend chart styling + behaviour shared by the Nigeria and Turkey pages.
+const TREND_TABS_STYLE = `
+    .chart-wrap { padding: 16px 16px 8px; overflow-x: auto; }
+    .trend-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 14px 16px 10px;
+    }
+    .trend-tabs button {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: #fbfcf9;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    .trend-tabs button.active {
+      border-color: currentColor;
+      background: var(--panel);
+    }
+    .trend-panels { border-top: 1px solid var(--line); }
+    .trend-panel { display: none; }
+    .trend-panel.active { display: block; }
+    .trend-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding: 12px 16px 0;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .trend-summary strong { color: var(--ink); }`;
+
+const TREND_TABS_SCRIPT = `
+    document.querySelectorAll("[data-trend-tabs]").forEach((tabs) => {
+      const buttons = [...tabs.querySelectorAll("[data-trend-tab]")];
+      const panelRoot = tabs.nextElementSibling;
+      const panels = panelRoot ? [...panelRoot.querySelectorAll("[data-trend-panel]")] : [];
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => {
+          buttons.forEach((item) => {
+            const active = item === button;
+            item.classList.toggle("active", active);
+            item.setAttribute("aria-selected", String(active));
+          });
+          panels.forEach((panel) => panel.classList.toggle("active", panel.id === button.getAttribute("aria-controls")));
+        });
+      });
+    });`;
+
 function renderNav(active) {
   const items = [
-    { href: "/", label: "尼日利亚 Claude", key: "nigeria" },
+    { href: "/", label: "尼日利亚订阅", key: "nigeria" },
     { href: "/turkey", label: "土耳其礼品卡", key: "turkey" },
   ];
   return `<nav class="nav">${items.map((item) =>
@@ -770,17 +912,18 @@ function renderNav(active) {
 
 function renderNigeriaDashboard(history, env) {
   const records = normalizeNigeriaHistory(history, env);
+  const items = nigeriaItems(env);
   const latest = records[records.length - 1] || null;
   const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
-  const cards = renderNigeriaCards(records, env);
-  const chart = renderNigeriaChart(records, "#2bb673");
+  const cards = renderNigeriaCards(records, items);
+  const trend = renderNigeriaTrendTabs(records, items);
 
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>尼日利亚 Claude 价格走势</title>
+  <title>尼日利亚订阅价格走势</title>
   <style>
     :root {
       color-scheme: light;
@@ -841,13 +984,10 @@ function renderNigeriaDashboard(history, env) {
       font-size: clamp(20px, 2.6vw, 26px);
       font-weight: 780;
     }
-    .chart-body {
-      padding: 18px 18px 8px;
-      overflow-x: auto;
-    }${CHART_STYLE}
+${CHART_STYLE}${TREND_TABS_STYLE}
     .cards {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 14px;
       margin-top: 16px;
     }
@@ -872,6 +1012,8 @@ function renderNigeriaDashboard(history, env) {
     .card .value.down { color: var(--coral); }
     .card .value.up { color: var(--green); }
     .card .sub { margin-top: 12px; color: var(--muted); font-size: 13px; }
+    .card .sub .up { color: var(--green); font-weight: 700; }
+    .card .sub .down { color: var(--coral); font-weight: 700; }
     .empty { padding: 60px 16px; text-align: center; color: var(--muted); }
     .top {
       display: flex;
@@ -949,17 +1091,17 @@ function renderNigeriaDashboard(history, env) {
         <span class="chart-icon" aria-hidden="true">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18 L9 12 L13 15 L20 6"/><path d="M3 21 H21"/></svg>
         </span>
-        <h1>尼日利亚 · 人民币价格走势</h1>
+        <h1>尼日利亚 · 订阅价格走势</h1>
       </div>
-      <div class="chart-body">${chart}</div>
+      ${trend}
     </section>
 
     <section class="cards">${cards}</section>
     ${renderNigeriaRates(latest)}
-    ${renderNigeriaHistory(records)}
-    <p class="meta">Claude Pro 月度订阅 · 数据来源 <a href="${escapeHtml(env.APPSTORE_URL || DEFAULT_APPSTORE_URL)}" target="_blank" rel="noreferrer">App Store Price</a> · 每日更新 · 最后更新：${escapeHtml(updatedAt)}</p>
+    ${renderNigeriaHistory(records, items)}
+    <p class="meta">月度订阅价格 · 数据来源 <a href="https://appstoreprice.org/zh" target="_blank" rel="noreferrer">App Store Price</a> · 每日更新 · 最后更新：${escapeHtml(updatedAt)}</p>
   </main>
-  <script>
+  <script>${TREND_TABS_SCRIPT}
     const scrapeBtn = document.querySelector("[data-scrape]");
     scrapeBtn?.addEventListener("click", async () => {
       let token = localStorage.getItem("ng_run_token") || "";
@@ -998,36 +1140,32 @@ function renderNigeriaDashboard(history, env) {
 }
 
 function renderNigeriaRates(latest) {
-  if (!latest) {
+  const fx = latest?.fx || null;
+  if (!fx) {
     return `<section class="panel">
       <div class="panel-head"><h2>汇率情况</h2></div>
       <div class="empty">暂无数据，等待首次抓取。</div>
     </section>`;
   }
 
-  const fx = latest.fx || null;
-  const cnyToNgn = Number(latest.priceCny) > 0
-    ? round2(Number(latest.priceNgn) / Number(latest.priceCny))
-    : null;
+  const cnyToNgn = Number(fx.ngnToCny) > 0 ? round2(1 / Number(fx.ngnToCny)) : null;
   const rateItem = (label, value) =>
     `<div class="rate-item"><div class="label">${label}</div><div class="value">${value}</div></div>`;
 
   const items = [
-    rateItem("Claude Pro 美元价", Number.isFinite(Number(latest.priceUsd)) ? `$${formatMoney(latest.priceUsd)}` : "--"),
-    rateItem("1 美元 ≈ 人民币", fx?.usdToCny ? `¥${formatMoney(fx.usdToCny)}` : "--"),
-    rateItem("1 美元 ≈ 奈拉", fx?.usdToNgn ? `₦${formatInteger(Math.round(fx.usdToNgn))}` : "--"),
+    rateItem("1 美元 ≈ 人民币", fx.usdToCny ? `¥${formatMoney(fx.usdToCny)}` : "--"),
+    rateItem("1 美元 ≈ 奈拉", fx.usdToNgn ? `₦${formatInteger(Math.round(fx.usdToNgn))}` : "--"),
     rateItem("1 人民币 ≈ 奈拉", cnyToNgn ? `₦${formatMoney(cnyToNgn)}` : "--"),
+    rateItem("汇率日期", fx.date ? escapeHtml(fx.date) : "--"),
   ].join("");
 
-  const dataDate = fx?.date ? `汇率日期 ${escapeHtml(fx.date)}` : "";
-
   return `<section class="panel">
-    <div class="panel-head"><h2>汇率情况</h2><p class="phead-meta">${dataDate}</p></div>
+    <div class="panel-head"><h2>汇率情况</h2></div>
     <div class="rates">${items}</div>
   </section>`;
 }
 
-function renderNigeriaHistory(records) {
+function renderNigeriaHistory(records, items) {
   if (records.length === 0) {
     return `<section class="panel">
       <div class="panel-head"><h2>历史记录</h2></div>
@@ -1035,74 +1173,107 @@ function renderNigeriaHistory(records) {
     </section>`;
   }
 
+  const header = items.map((item) => `<th>${escapeHtml(item.short || item.label)}</th>`).join("");
   const rows = [...records].reverse().map((record) => {
-    const cnyToNgn = Number(record.priceCny) > 0
-      ? round2(Number(record.priceNgn) / Number(record.priceCny))
-      : null;
-    return `<tr>
-      <td>${escapeHtml(formatDay(record.capturedAt))}</td>
-      <td>¥${formatMoney(record.priceCny)}</td>
-      <td>${Number.isFinite(Number(record.priceUsd)) ? `$${formatMoney(record.priceUsd)}` : "--"}</td>
-      <td>${cnyToNgn ? `₦${formatMoney(cnyToNgn)}` : "--"}</td>
-      <td><a href="${escapeHtml(record.sourceUrl)}" target="_blank" rel="noreferrer">App Store</a></td>
-    </tr>`;
+    const cells = items.map((item) => {
+      const price = record.items?.[item.key];
+      return `<td>${Number.isFinite(Number(price?.priceCny)) ? `¥${formatMoney(price.priceCny)}` : "--"}</td>`;
+    }).join("");
+    return `<tr><td>${escapeHtml(formatDay(record.capturedAt))}</td>${cells}</tr>`;
   }).join("");
 
   return `<section class="panel">
-    <div class="panel-head"><h2>历史记录</h2><p class="phead-meta">${records.length} 天</p></div>
+    <div class="panel-head"><h2>历史记录</h2><p class="phead-meta">${records.length} 天 · 单位 ¥</p></div>
     <div class="table-wrap"><table>
-      <thead><tr><th>日期</th><th>人民币</th><th>美元</th><th>1 元 ≈ 奈拉</th><th>来源</th></tr></thead>
+      <thead><tr><th>日期</th>${header}</tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
   </section>`;
 }
 
-function renderNigeriaCards(records, env) {
-  if (records.length === 0) {
-    const placeholder = (label) => `<article class="card"><div class="label">${label}</div><div class="value">--</div><div class="sub">等待首次抓取</div></article>`;
-    return ["当前", "最高", "最低", "涨跌"].map(placeholder).join("");
-  }
+function renderNigeriaCards(records, items) {
+  return items.map((item) => {
+    const series = nigeriaItemSeries(records, item.key);
+    if (series.length === 0) {
+      return `<article class="card"><div class="label">${escapeHtml(item.label)}</div><div class="value">--</div><div class="sub">等待首次抓取</div></article>`;
+    }
 
-  const latest = records[records.length - 1];
-  const first = records[0];
-  const highest = records.reduce((a, b) => (Number(b.priceCny) > Number(a.priceCny) ? b : a));
-  const lowest = records.reduce((a, b) => (Number(b.priceCny) < Number(a.priceCny) ? b : a));
-  const changePercent = Number(first.priceCny) > 0
-    ? round2((Number(latest.priceCny) / Number(first.priceCny) - 1) * 100)
-    : 0;
-  const direction = changePercent > 0 ? "up" : changePercent < 0 ? "down" : "";
-  const arrow = changePercent > 0 ? "↗" : changePercent < 0 ? "↘" : "→";
+    const latest = series[series.length - 1];
+    const first = series[0];
+    const changePercent = Number(first.priceCny) > 0
+      ? round2((Number(latest.priceCny) / Number(first.priceCny) - 1) * 100)
+      : 0;
+    const direction = changePercent > 0 ? "up" : changePercent < 0 ? "down" : "";
+    const arrow = changePercent > 0 ? "↗" : changePercent < 0 ? "↘" : "→";
 
-  return `<article class="card">
-      <div class="label">当前</div>
+    return `<article class="card">
+      <div class="label">${escapeHtml(item.label)}</div>
       <div class="value"><span class="hl">¥${formatMoney(latest.priceCny)}</span></div>
-      <div class="sub">${formatInteger(latest.priceNgn)} NGN</div>
-    </article>
-    <article class="card">
-      <div class="label">最高</div>
-      <div class="value">¥${formatMoney(highest.priceCny)}</div>
-      <div class="sub">${escapeHtml(formatDay(highest.capturedAt))}</div>
-    </article>
-    <article class="card">
-      <div class="label">最低</div>
-      <div class="value">¥${formatMoney(lowest.priceCny)}</div>
-      <div class="sub">${escapeHtml(formatDay(lowest.capturedAt))}</div>
-    </article>
-    <article class="card">
-      <div class="label">涨跌</div>
-      <div class="value ${direction}">${arrow} ${formatSignedPercent(changePercent)}</div>
-      <div class="sub">较 ${escapeHtml(String(retentionDays(env)))} 天前</div>
+      <div class="sub">${formatInteger(latest.priceNgn)} NGN · <span class="${direction}">${arrow} ${formatSignedPercent(changePercent)}</span></div>
     </article>`;
+  }).join("");
 }
 
-function renderNigeriaChart(records, color) {
+function renderNigeriaTrendTabs(records, items) {
+  if (records.length === 0) {
+    return `<div class="empty">暂无数据，点击“手动抓取”生成第一条记录。</div>`;
+  }
+
+  const tabs = items.map((item, index) => {
+    const active = index === 0 ? " active" : "";
+    const selected = index === 0 ? "true" : "false";
+    return `<button class="${active}" type="button" role="tab" aria-selected="${selected}" aria-controls="ng-trend-${index}" data-trend-tab style="color:${item.color}">${escapeHtml(item.label)}</button>`;
+  }).join("");
+  const panels = items.map((item, index) => {
+    const active = index === 0 ? " active" : "";
+    return `<div id="ng-trend-${index}" class="trend-panel${active}" role="tabpanel" data-trend-panel>
+      ${renderNigeriaTrendSummary(records, item)}
+      <div class="chart-wrap">${renderNigeriaItemChart(records, item, index)}</div>
+    </div>`;
+  }).join("");
+
+  return `<div class="trend-tabs" role="tablist" aria-label="订阅项目" data-trend-tabs>${tabs}</div>
+    <div class="trend-panels">${panels}</div>`;
+}
+
+function renderNigeriaTrendSummary(records, item) {
+  const series = nigeriaItemSeries(records, item.key);
+  if (series.length === 0) {
+    return `<div class="trend-summary"><span>暂无 ${escapeHtml(item.label)} 数据</span></div>`;
+  }
+
+  const values = series.map((price) => Number(price.priceCny));
+  const latest = values[values.length - 1];
+  const first = values[0];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+
+  return `<div class="trend-summary">
+    <span>最新 <strong>¥${formatMoney(latest)}</strong></span>
+    <span>区间 <strong>¥${formatMoney(min)} - ¥${formatMoney(max)}</strong></span>
+    <span>较首条 <strong>${formatSignedMoney(round2(latest - first))}</strong></span>
+  </div>`;
+}
+
+function renderNigeriaItemChart(records, item, index) {
   const points = records
-    .map((record) => ({ price: Number(record.priceCny), capturedAt: record.capturedAt }))
-    .filter((point) => Number.isFinite(point.price));
-  return renderTrendChart(points, color, "trend-ng", {
-    ariaLabel: "尼日利亚 Claude 人民币价格走势",
-    emptyText: "暂无数据，等待首次抓取生成第一条记录。",
+    .map((record) => {
+      const price = record.items?.[item.key];
+      return Number.isFinite(Number(price?.priceCny))
+        ? { price: Number(price.priceCny), capturedAt: record.capturedAt }
+        : null;
+    })
+    .filter(Boolean);
+  return renderTrendChart(points, item.color, `trend-ng-${index}`, {
+    ariaLabel: `${item.label} 人民币价格走势`,
+    emptyText: `暂无 ${escapeHtml(item.label)} 数据。`,
   });
+}
+
+function nigeriaItemSeries(records, key) {
+  return records
+    .map((record) => record.items?.[key])
+    .filter((price) => Number.isFinite(Number(price?.priceCny)));
 }
 
 // Shared area-style trend chart used by both the Nigeria and Turkey pages.
@@ -1337,54 +1508,7 @@ function renderDashboard(history, env) {
       margin: 0;
       font-size: 16px;
     }
-    .chart-wrap {
-      padding: 16px 16px 8px;
-      overflow-x: auto;
-    }${CHART_STYLE}
-    .trend-tabs {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      padding: 14px 16px 10px;
-    }
-    .trend-tabs button {
-      display: inline-flex;
-      align-items: center;
-      min-height: 32px;
-      padding: 0 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      color: var(--muted);
-      background: #fbfcf9;
-      font: inherit;
-      font-size: 13px;
-      font-weight: 750;
-      cursor: pointer;
-    }
-    .trend-tabs button.active {
-      border-color: currentColor;
-      background: var(--panel);
-    }
-    .trend-panels {
-      border-top: 1px solid var(--line);
-    }
-    .trend-panel {
-      display: none;
-    }
-    .trend-panel.active {
-      display: block;
-    }
-    .trend-summary {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 14px;
-      padding: 12px 16px 0;
-      font-size: 13px;
-      color: var(--muted);
-    }
-    .trend-summary strong {
-      color: var(--ink);
-    }
+${CHART_STYLE}${TREND_TABS_STYLE}
     table {
       width: 100%;
       border-collapse: collapse;
@@ -1449,22 +1573,7 @@ function renderDashboard(history, env) {
       <div class="table-wrap">${table}</div>
     </section>
   </main>
-  <script>
-    document.querySelectorAll("[data-trend-tabs]").forEach((tabs) => {
-      const buttons = [...tabs.querySelectorAll("[data-trend-tab]")];
-      const panelRoot = tabs.nextElementSibling;
-      const panels = panelRoot ? [...panelRoot.querySelectorAll("[data-trend-panel]")] : [];
-      buttons.forEach((button) => {
-        button.addEventListener("click", () => {
-          buttons.forEach((item) => {
-            const active = item === button;
-            item.classList.toggle("active", active);
-            item.setAttribute("aria-selected", String(active));
-          });
-          panels.forEach((panel) => panel.classList.toggle("active", panel.id === button.getAttribute("aria-controls")));
-        });
-      });
-    });
+  <script>${TREND_TABS_SCRIPT}
   </script>
 </body>
 </html>`;
