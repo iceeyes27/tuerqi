@@ -2,6 +2,59 @@ const HISTORY_KEY = "seagm:history:v1";
 const DEFAULT_RETENTION_DAYS = 60;
 const DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const GOOGLE_FINANCE_TRY_CNY_URL = "https://www.google.com/finance/quote/TRY-CNY";
+const APPSTOREPRICE_SUBSCRIPTION_SOURCES = {
+  "youtube-family": {
+    url: "https://appstoreprice.org/zh/apps/544007664",
+    subscriptionIds: [
+      "com.google.youtube.family.red.subscription_NFT",
+      "com.google.youtube.family.red.subscription",
+    ],
+    fallbackName: "YouTube Premium Family",
+  },
+  "spotify-family": {
+    url: "https://appstoreprice.org/zh/apps/spotify",
+    subscriptionIds: ["spotify_family"],
+    fallbackName: "Spotify 会员 (家庭)",
+  },
+};
+const DEFAULT_RIDESHARE_PLANS = [
+  {
+    id: "youtube-family",
+    sourceKey: "youtube-family",
+    name: "YouTube Premium Family",
+    platform: "YouTube",
+    totalSeats: 6,
+    ownerSeats: 1,
+    renewOn: "2026-07-31",
+    note: "价格来自 appstoreprice 的尼日利亚 CNY 数据。",
+    seats: [
+      { slot: "1", name: "我", status: "owner", paidThrough: "2026-07-31", note: "自用" },
+      { slot: "2", status: "available" },
+      { slot: "3", status: "available" },
+      { slot: "4", status: "available" },
+      { slot: "5", status: "available" },
+      { slot: "6", status: "available" },
+    ],
+  },
+  {
+    id: "spotify-family",
+    sourceKey: "spotify-family",
+    name: "Spotify 家庭会员",
+    platform: "Spotify",
+    totalSeats: 6,
+    ownerSeats: 1,
+    renewOn: "2026-07-31",
+    note: "价格来自 appstoreprice 的尼日利亚 CNY 数据。",
+    seats: [
+      { slot: "1", name: "我", status: "owner", paidThrough: "2026-07-31", note: "自用" },
+      { slot: "2", status: "available" },
+      { slot: "3", status: "available" },
+      { slot: "4", status: "available" },
+      { slot: "5", status: "available" },
+      { slot: "6", status: "available" },
+    ],
+  },
+];
 
 export default {
   async scheduled(event, env, ctx) {
@@ -14,7 +67,8 @@ export default {
     try {
       if (url.pathname === "/") {
         const history = await loadHistory(env);
-        return html(renderDashboard(history, env));
+        const subscriptionPrices = await loadSubscriptionPrices();
+        return html(renderDashboard(history, env, subscriptionPrices));
       }
 
       if (url.pathname === "/api/history") {
@@ -25,6 +79,21 @@ export default {
           retentionDays: retentionDays(env),
           latest: latestRecord(records),
           records,
+        });
+      }
+
+      if (url.pathname === "/api/rideshare") {
+        const history = await loadHistory(env);
+        const records = compactDuplicateHistory(pruneHistory(history, retentionDays(env)));
+        const latest = latestRecord(records);
+        const subscriptionPrices = await loadSubscriptionPrices();
+        const plans = buildRideSharePlans(parseRideSharePlans(env), latest?.fx, subscriptionPrices);
+        return json({
+          ok: true,
+          latestFx: latest?.fx || null,
+          subscriptionPrices,
+          summary: summarizeRideSharePlans(plans),
+          plans,
         });
       }
 
@@ -109,6 +178,98 @@ async function fetchGoogleFxSnapshot(denoms) {
       prices: [],
     };
   }
+}
+
+async function loadSubscriptionPrices() {
+  const entries = await Promise.all(Object.entries(APPSTOREPRICE_SUBSCRIPTION_SOURCES).map(async ([key, source]) => {
+    const snapshot = await fetchAppStorePriceSubscription(source);
+    return [key, snapshot];
+  }));
+  return Object.fromEntries(entries);
+}
+
+async function fetchAppStorePriceSubscription(source) {
+  try {
+    const response = await fetchWithTimeout(source.url, {
+      headers: {
+        "accept": "text/html,application/xhtml+xml",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "user-agent": "Mozilla/5.0 seagm-price-monitor/2.0",
+      },
+    }, 12000);
+
+    if (!response.ok) {
+      throw new Error(`appstoreprice request failed: ${response.status} ${response.statusText}`);
+    }
+
+    const pageHtml = await response.text();
+    const parsed = extractAppStorePriceNigeriaSubscription(pageHtml, source.subscriptionIds);
+    if (!parsed) {
+      throw new Error("Could not find Nigeria price row for subscription");
+    }
+
+    return {
+      ok: true,
+      source: "appstoreprice",
+      sourceUrl: source.url,
+      subscriptionId: parsed.subscriptionId,
+      name: parsed.name || source.fallbackName,
+      region: parsed.region,
+      currency: parsed.currency,
+      originalPriceText: `${parsed.currency}${formatNumberString(parsed.priceLocal)}`,
+      priceLocal: parsed.priceLocal,
+      priceUsd: parsed.priceUsd,
+      priceCny: round2(parsed.priceCny),
+      status: "最低",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      source: "appstoreprice",
+      sourceUrl: source.url,
+      name: source.fallbackName,
+      error: error?.message || String(error),
+    };
+  }
+}
+
+function extractAppStorePriceNigeriaSubscription(pageHtml, subscriptionIds) {
+  for (const subscriptionId of subscriptionIds) {
+    const startIndex = pageHtml.indexOf(subscriptionId);
+    if (startIndex < 0) {
+      continue;
+    }
+
+    const slice = pageHtml.slice(startIndex, startIndex + 12000);
+    const nameMatch = slice.match(/nameZh\\":\\"([^\\"]+)\\"/);
+    const nigeriaMatch = slice.match(/\{\\"region\\":\\"NG\\",\\"regionName\\":\\"([^\\"]+)\\",\\"currency\\":\\"([^\\"]+)\\",\\"price\\":([0-9.]+),\\"priceUsd\\":([0-9.]+),\\"priceCny\\":([0-9.]+)\}/);
+    if (!nameMatch || !nigeriaMatch) {
+      continue;
+    }
+
+    return {
+      subscriptionId,
+      name: decodeEscapedText(nameMatch[1]),
+      region: decodeEscapedText(nigeriaMatch[1]),
+      currency: nigeriaMatch[2],
+      priceLocal: Number(nigeriaMatch[3]),
+      priceUsd: Number(nigeriaMatch[4]),
+      priceCny: Number(nigeriaMatch[5]),
+    };
+  }
+
+  return null;
+}
+
+function formatNumberString(value) {
+  return new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function decodeEscapedText(value) {
+  return JSON.parse(`"${value}"`);
 }
 
 async function fetchWithTimeout(url, init, timeoutMs) {
@@ -465,10 +626,13 @@ function stableStringify(value) {
   return JSON.stringify(value);
 }
 
-function renderDashboard(history, env) {
+function renderDashboard(history, env, subscriptionPrices = {}) {
   const denoms = parseDenoms(env.DENOMS);
   const records = compactDuplicateHistory(pruneHistory(history, retentionDays(env)));
   const latest = latestRecord(records);
+  const rideSharePlans = buildRideSharePlans(parseRideSharePlans(env), latest?.fx, subscriptionPrices);
+  const rideShareOverview = renderRideShareOverview(rideSharePlans);
+  const rideShareSection = renderRideShareSection(rideSharePlans);
   const trendTabs = renderTrendTabs(records, denoms);
   const latestCards = renderLatestCards(latest, denoms);
   const table = renderHistoryTable(records, denoms);
@@ -555,12 +719,60 @@ function renderDashboard(history, env) {
       gap: 12px;
       margin-bottom: 14px;
     }
+    .ride-cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding: 16px;
+      border-top: 1px solid var(--line);
+    }
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 16px;
       min-height: 128px;
+    }
+    .ride-card {
+      background: #fbfcf9;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .ride-card h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+    .ride-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 14px;
+      margin-top: 14px;
+    }
+    .ride-metric {
+      min-width: 0;
+    }
+    .ride-metric .label,
+    .ride-card .label {
+      display: block;
+    }
+    .ride-metric .value {
+      margin-top: 4px;
+      font-size: 18px;
+      font-weight: 760;
+      line-height: 1.2;
+    }
+    .ride-note {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .legend {
+      padding: 0 16px 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
     }
     .label {
       color: var(--muted);
@@ -680,6 +892,7 @@ function renderDashboard(history, env) {
       text-align: left;
       border-bottom: 1px solid var(--line);
       white-space: nowrap;
+      vertical-align: top;
     }
     th {
       color: var(--muted);
@@ -697,7 +910,9 @@ function renderDashboard(history, env) {
     @media (max-width: 760px) {
       header { display: block; }
       .actions { justify-content: flex-start; margin-top: 14px; }
-      .cards { grid-template-columns: 1fr; }
+      .cards,
+      .ride-cards,
+      .ride-grid { grid-template-columns: 1fr; }
       main { width: min(100vw - 24px, 1120px); padding-top: 20px; }
       .table-wrap { overflow-x: auto; }
     }
@@ -712,12 +927,23 @@ function renderDashboard(history, env) {
       </div>
       <div class="actions">
         <a class="button" href="/api/history">JSON</a>
+        <a class="button" href="/api/rideshare">拼车 JSON</a>
         <a class="button" href="/run?dry=1">试抓</a>
         <a class="button primary" href="/run">抓取并保存</a>
       </div>
     </header>
 
     <section class="cards">${latestCards}</section>
+
+    <section class="cards">${rideShareOverview}</section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>拼车</h2>
+        <p class="meta">用于对账、成本核算和车位状态跟踪</p>
+      </div>
+      ${rideShareSection}
+    </section>
 
     <section class="panel">
       <div class="panel-head">
@@ -772,6 +998,297 @@ function renderLatestCards(latest, denoms) {
       <div class="sub">原价 ¥${formatMoney(price.originalPriceCny)} · 折扣 ${formatMoney(price.discountPercent)}%<br>${googleLine}<br>SEAGM Credits ${price.credits}</div>
     </article>`;
   }).join("");
+}
+
+function parseRideSharePlans(env) {
+  const source = String(env.RIDESHARE_PLANS_JSON || "").trim();
+  if (!source) {
+    return DEFAULT_RIDESHARE_PLANS;
+  }
+
+  try {
+    const parsed = JSON.parse(source);
+    return Array.isArray(parsed) ? parsed : DEFAULT_RIDESHARE_PLANS;
+  } catch {
+    return DEFAULT_RIDESHARE_PLANS;
+  }
+}
+
+function buildRideSharePlans(plans, fx, subscriptionPrices = {}) {
+  return plans.map((plan, index) => buildRideSharePlan(plan, fx, index, subscriptionPrices[plan.sourceKey] || null));
+}
+
+function buildRideSharePlan(plan, fx, index, subscriptionSnapshot) {
+  const totalSeats = Math.max(1, Number(plan.totalSeats) || 6);
+  const ownerSeats = Math.min(totalSeats, Math.max(1, Number(plan.ownerSeats) || 1));
+  const sellableSeats = Math.max(0, totalSeats - ownerSeats);
+  const priceCny = toFiniteNumber(subscriptionSnapshot?.priceCny);
+  const seats = normalizeRideShareSeats(plan.seats, totalSeats, ownerSeats, priceCny, sellableSeats);
+  const occupiedExternalSeats = seats.filter((seat) => seat.status === "occupied" || seat.status === "pending").length;
+  const availableSeats = seats.filter((seat) => seat.status === "available").length;
+  const paidRevenueCny = round2(seats.reduce((sum, seat) => sum + (seat.status === "owner" ? 0 : (toFiniteNumber(seat.paidAmountCny) || 0)), 0));
+  const ownerSeatCostCny = priceCny != null ? round2(priceCny / totalSeats) : null;
+  const breakEvenPerExternalSeatCny = priceCny != null && sellableSeats > 0 ? round2(priceCny / sellableSeats) : null;
+  const suggestedPerExternalSeatCny = breakEvenPerExternalSeatCny != null ? roundUpCnyPrice(breakEvenPerExternalSeatCny) : null;
+  const expectedRevenueCny = suggestedPerExternalSeatCny != null ? round2(occupiedExternalSeats * suggestedPerExternalSeatCny) : null;
+  const outstandingCny = expectedRevenueCny != null ? round2(Math.max(0, expectedRevenueCny - paidRevenueCny)) : null;
+  const monthlyCostTry = priceCny != null && Number.isFinite(fx?.rateCnyPerTry) && fx.rateCnyPerTry > 0
+    ? round2(priceCny / fx.rateCnyPerTry)
+    : null;
+
+  return {
+    id: plan.id || `plan-${index + 1}`,
+    sourceKey: plan.sourceKey || "",
+    name: plan.name || subscriptionSnapshot?.name || `拼车计划 ${index + 1}`,
+    platform: plan.platform || "",
+    region: subscriptionSnapshot?.region || plan.region || "尼日利亚",
+    currency: subscriptionSnapshot?.currency || plan.currency || "NGN",
+    billingCycle: plan.billingCycle || "monthly",
+    sourceUrl: subscriptionSnapshot?.sourceUrl || "",
+    sourceStatus: subscriptionSnapshot?.status || "",
+    originalPriceText: subscriptionSnapshot?.originalPriceText || "",
+    priceCny,
+    priceTry: monthlyCostTry,
+    totalSeats,
+    ownerSeats,
+    sellableSeats,
+    occupiedExternalSeats,
+    availableSeats,
+    renewOn: plan.renewOn || "",
+    daysUntilRenew: daysUntil(plan.renewOn),
+    note: plan.note || subscriptionSnapshot?.error || "",
+    ownerSeatCostCny,
+    breakEvenPerExternalSeatCny,
+    suggestedPerExternalSeatCny,
+    expectedRevenueCny,
+    paidRevenueCny,
+    outstandingCny,
+    seats,
+    subscriptionSnapshot,
+  };
+}
+
+function normalizeRideShareSeats(inputSeats, totalSeats, ownerSeats, priceCny, sellableSeats) {
+  const suggestedCharge = priceCny != null && sellableSeats > 0 ? roundUpCnyPrice(priceCny / sellableSeats) : null;
+  const seats = Array.isArray(inputSeats) ? inputSeats : [];
+  const normalized = [];
+
+  for (let index = 0; index < totalSeats; index += 1) {
+    const seat = seats[index] || {};
+    const status = normalizeSeatStatus(seat.status, index, ownerSeats);
+    normalized.push({
+      slot: seat.slot || String(index + 1),
+      name: seat.name || (status === "owner" ? "我" : ""),
+      status,
+      paidThrough: seat.paidThrough || "",
+      chargeCny: toFiniteNumber(seat.chargeCny) ?? (status === "owner" ? null : suggestedCharge),
+      paidAmountCny: toFiniteNumber(seat.paidAmountCny) ?? null,
+      note: seat.note || "",
+    });
+  }
+
+  return normalized;
+}
+
+function normalizeSeatStatus(status, index, ownerSeats) {
+  if (status === "owner" || status === "occupied" || status === "available" || status === "pending") {
+    return status;
+  }
+  return index < ownerSeats ? "owner" : "available";
+}
+
+function summarizeRideSharePlans(plans) {
+  const pricedPlans = plans.filter((plan) => plan.priceCny != null);
+  const upcomingDates = plans.map((plan) => plan.renewOn).filter(Boolean).sort();
+  return {
+    totalMonthlyCostCny: round2(pricedPlans.reduce((sum, plan) => sum + plan.priceCny, 0)),
+    totalMonthlyCostTry: summarizeOptional(plans.map((plan) => plan.priceTry)),
+    totalSellableSeats: plans.reduce((sum, plan) => sum + plan.sellableSeats, 0),
+    totalOccupiedSeats: plans.reduce((sum, plan) => sum + plan.occupiedExternalSeats, 0),
+    totalAvailableSeats: plans.reduce((sum, plan) => sum + plan.availableSeats, 0),
+    totalOutstandingCny: summarizeOptional(plans.map((plan) => plan.outstandingCny)),
+    nextRenewOn: upcomingDates[0] || "",
+  };
+}
+
+function summarizeOptional(values) {
+  const numbers = values.filter((value) => Number.isFinite(value));
+  if (numbers.length === 0) {
+    return null;
+  }
+  return round2(numbers.reduce((sum, value) => sum + value, 0));
+}
+
+function renderRideShareOverview(plans) {
+  const summary = summarizeRideSharePlans(plans);
+  const cards = [
+    {
+      label: "拼车月成本",
+      price: summary.totalMonthlyCostCny > 0 ? formatCny(summary.totalMonthlyCostCny) : "价格读取失败",
+      sub: summary.totalMonthlyCostTry != null
+        ? `约 ₺${formatMoney(summary.totalMonthlyCostTry)}`
+        : "按 appstoreprice 尼日利亚价格汇总",
+    },
+    {
+      label: "可外拼车位",
+      price: `${summary.totalOccupiedSeats}/${summary.totalSellableSeats}`,
+      sub: `已占用 ${summary.totalOccupiedSeats} · 空位 ${summary.totalAvailableSeats}`,
+    },
+    {
+      label: "待收金额",
+      price: summary.totalOutstandingCny != null ? formatCny(summary.totalOutstandingCny) : "价格读取失败",
+      sub: summary.nextRenewOn
+        ? `最近到期 ${escapeHtml(formatDate(summary.nextRenewOn))}`
+        : "补充 renewOn 后可显示最近到期日",
+    },
+  ];
+
+  return cards.map((item) => `
+    <article class="card">
+      <div class="label">${escapeHtml(item.label)}</div>
+      <div class="price">${escapeHtml(item.price)}</div>
+      <div class="sub">${escapeHtml(item.sub)}</div>
+    </article>
+  `).join("");
+}
+
+function renderRideShareSection(plans) {
+  if (plans.length === 0) {
+    return `<div class="empty">暂无拼车配置。</div>`;
+  }
+
+  const cards = plans.map((plan) => renderRideSharePlanCard(plan)).join("");
+  const tables = plans.map((plan) => renderRideShareSeatTable(plan)).join("");
+  return `<div class="ride-cards">${cards}</div>
+    <div class="legend">说明：价格取自 appstoreprice 尼日利亚区 CNY。自用成本 = 总价 ÷ 总座位；回本价 = 总价 ÷ 可外拼座位；建议收费 = 回本价向上取整到 0.5 元。状态：owner 自用，occupied 已上车，pending 待付款/待确认，available 空位。</div>
+    ${tables}`;
+}
+
+function renderRideSharePlanCard(plan) {
+  const renewLine = plan.renewOn
+    ? `${formatDate(plan.renewOn)}${plan.daysUntilRenew != null ? ` · ${plan.daysUntilRenew >= 0 ? `还有 ${plan.daysUntilRenew} 天` : `已过期 ${Math.abs(plan.daysUntilRenew)} 天`}` : ""}`
+    : "未填写";
+  const priceLine = plan.priceCny != null
+    ? `${plan.originalPriceText || ""}${plan.originalPriceText ? " · " : ""}${formatCny(plan.priceCny)} / 月`
+    : "价格读取失败";
+
+  return `<article class="ride-card">
+    <div class="label">${escapeHtml([plan.platform, plan.region].filter(Boolean).join(" · "))}</div>
+    <h3>${escapeHtml(plan.name)}</h3>
+    <div class="ride-grid">
+      <div class="ride-metric">
+        <span class="label">官方标价</span>
+        <div class="value">${escapeHtml(priceLine)}</div>
+      </div>
+      <div class="ride-metric">
+        <span class="label">续费/到期</span>
+        <div class="value">${escapeHtml(renewLine)}</div>
+      </div>
+      <div class="ride-metric">
+        <span class="label">我的单座成本</span>
+        <div class="value">${formatMaybeCny(plan.ownerSeatCostCny)}</div>
+      </div>
+      <div class="ride-metric">
+        <span class="label">外拼回本价</span>
+        <div class="value">${formatMaybeCny(plan.breakEvenPerExternalSeatCny)}</div>
+      </div>
+      <div class="ride-metric">
+        <span class="label">建议收费</span>
+        <div class="value">${formatMaybeCny(plan.suggestedPerExternalSeatCny)}</div>
+      </div>
+      <div class="ride-metric">
+        <span class="label">车位情况</span>
+        <div class="value">${plan.occupiedExternalSeats}/${plan.sellableSeats} 已上车 · ${plan.availableSeats} 空位</div>
+      </div>
+      <div class="ride-metric">
+        <span class="label">已收 / 待收</span>
+        <div class="value">${formatMaybeCny(plan.paidRevenueCny)} / ${formatMaybeCny(plan.outstandingCny)}</div>
+      </div>
+      <div class="ride-metric">
+        <span class="label">价格来源</span>
+        <div class="value">${plan.subscriptionSnapshot?.ok ? `<a href="${escapeHtml(plan.sourceUrl)}" target="_blank" rel="noreferrer">appstoreprice</a>` : "读取失败"}</div>
+      </div>
+    </div>
+    ${plan.note ? `<div class="ride-note">${escapeHtml(plan.note)}</div>` : ""}
+  </article>`;
+}
+
+function renderRideShareSeatTable(plan) {
+  const rows = plan.seats.map((seat) => `<tr>
+    <td>${escapeHtml(seat.slot)}</td>
+    <td>${escapeHtml(seat.name || "--")}</td>
+    <td>${escapeHtml(formatSeatStatus(seat.status))}</td>
+    <td>${seat.status === "owner" ? "自用" : formatMaybeCny(seat.chargeCny)}</td>
+    <td>${seat.status === "owner" ? "--" : formatMaybeCny(seat.paidAmountCny)}</td>
+    <td>${escapeHtml(seat.paidThrough ? formatDate(seat.paidThrough) : "--")}</td>
+    <td>${escapeHtml(seat.note || "--")}</td>
+  </tr>`).join("");
+
+  return `<div class="panel-head">
+      <h2>${escapeHtml(plan.name)} 车位明细</h2>
+      <p class="meta">${plan.sellableSeats} 个外拼位</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>车位</th><th>成员</th><th>状态</th><th>收费标准</th><th>已收金额</th><th>有效期</th><th>备注</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function formatSeatStatus(status) {
+  return {
+    owner: "自用",
+    occupied: "已上车",
+    pending: "待确认",
+    available: "空位",
+  }[status] || status;
+}
+
+function formatMaybeCny(value) {
+  return Number.isFinite(value) ? formatCny(value) : "价格读取失败";
+}
+
+function formatCny(value) {
+  return `¥${formatMoney(value)}`;
+}
+
+function roundUpCnyPrice(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return null;
+  }
+  return Math.ceil(number * 2) / 2;
+}
+
+function daysUntil(value) {
+  if (!value) {
+    return null;
+  }
+  const target = Date.parse(value);
+  if (!Number.isFinite(target)) {
+    return null;
+  }
+  return Math.ceil((target - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+function formatDate(value) {
+  if (!value) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(value));
+}
+
+function toFiniteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function renderTrendTabs(records, denoms) {

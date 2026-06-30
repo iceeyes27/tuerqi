@@ -9,6 +9,46 @@ crons = ["0 0 * * *", "0 6 * * *"]
 SEAGM_URL = "https://www.seagm.com/zh-cn/itunes-gift-card-turkey?item_id=16820"
 DENOMS = "500,1000,2000"
 RETENTION_DAYS = "60"
+RIDESHARE_PLANS_JSON = '''
+[
+  {
+    "id": "youtube-family",
+    "sourceKey": "youtube-family",
+    "name": "YouTube Premium Family",
+    "platform": "YouTube",
+    "totalSeats": 6,
+    "ownerSeats": 1,
+    "renewOn": "2026-07-31",
+    "note": "价格来自 appstoreprice 的尼日利亚 CNY 数据。",
+    "seats": [
+      { "slot": "1", "name": "我", "status": "owner", "paidThrough": "2026-07-31", "note": "自用" },
+      { "slot": "2", "status": "available" },
+      { "slot": "3", "status": "available" },
+      { "slot": "4", "status": "available" },
+      { "slot": "5", "status": "available" },
+      { "slot": "6", "status": "available" }
+    ]
+  },
+  {
+    "id": "spotify-family",
+    "sourceKey": "spotify-family",
+    "name": "Spotify 家庭会员",
+    "platform": "Spotify",
+    "totalSeats": 6,
+    "ownerSeats": 1,
+    "renewOn": "2026-07-31",
+    "note": "价格来自 appstoreprice 的尼日利亚 CNY 数据。",
+    "seats": [
+      { "slot": "1", "name": "我", "status": "owner", "paidThrough": "2026-07-31", "note": "自用" },
+      { "slot": "2", "status": "available" },
+      { "slot": "3", "status": "available" },
+      { "slot": "4", "status": "available" },
+      { "slot": "5", "status": "available" },
+      { "slot": "6", "status": "available" }
+    ]
+  }
+]
+'''
 
 [[kv_namespaces]]
 binding = "PRICE_HISTORY"
