@@ -124,6 +124,80 @@ Edit `wrangler.toml`:
 DENOMS = "500,1000,2000"
 ```
 
+## Configure Ride Sharing Board
+
+首页除了订阅价格走势，也支持一个**拼车对账板块**，用于记录 YouTube / Spotify 家庭会员的车位状态、到期时间、成本、建议收费、已收/待收金额。
+
+拼车板块分成两部分：
+
+1. **订阅价格**：复用尼日利亚订阅监控的每日 CNY 数据。
+2. **对账信息**：由 `RIDESHARE_PLANS_JSON` 维护车位、到期日、已收金额。
+
+当前默认接入来源：
+
+- YouTube Premium Family: `https://appstoreprice.org/zh/apps/544007664`
+- Spotify 家庭会员: `https://appstoreprice.org/zh/apps/spotify`
+
+`RIDESHARE_PLANS_JSON` 主要字段：
+
+- `id`
+- `sourceKey`（对应 `nigeriaItems()` 中的 key，例如 `youtube-family` / `spotify-family`）
+- `name`
+- `platform`
+- `totalSeats`
+- `ownerSeats`
+- `renewOn`
+- `note`
+- `seats[]`
+
+每个 seat 可配置：
+
+- `slot`
+- `name`
+- `status`: `owner | occupied | pending | available`
+- `paidThrough`
+- `chargeCny`
+- `paidAmountCny`
+- `note`
+
+示例：
+
+```toml
+RIDESHARE_PLANS_JSON = '''
+[
+  {
+    "id": "spotify-family",
+    "sourceKey": "spotify-family",
+    "name": "Spotify 家庭会员",
+    "platform": "Spotify",
+    "totalSeats": 6,
+    "ownerSeats": 1,
+    "renewOn": "2026-07-31",
+    "seats": [
+      { "slot": "1", "name": "我", "status": "owner" },
+      { "slot": "2", "name": "A", "status": "occupied", "paidThrough": "2026-07-31", "paidAmountCny": 2.5 },
+      { "slot": "3", "status": "available" }
+    ]
+  }
+]
+'''
+```
+
+页面会自动计算：
+
+- 官方标价（NGN + CNY）
+- 我的单座成本 = `总价 / 总座位数`
+- 外拼回本价 = `总价 / 可外拼座位数`
+- 建议收费 = 回本价向上取整到 `0.5` 元
+- 已收 / 待收金额
+- 已占用 / 空余车位数
+
+说明：
+
+- 默认按“我占 1 座”设计。
+- 价格读取失败或当天缺少家庭会员数据时，拼车板块会显示失败状态，但不会影响主页面返回。
+- 当前抓取的家庭会员价格以 App Store Price 尼日利亚区页面为准。
+
 ## View Data
 
 Production dashboard:

@@ -14,6 +14,44 @@ function nigeriaItems(env) {
     { key: "spotify-family", label: "Spotify 家庭", short: "Spotify 家庭", url: `${NIGERIA_APPSTORE_BASE}spotify`, plan: "Premium Family", duration: "monthly", color: "#157a3a" },
   ];
 }
+const DEFAULT_RIDESHARE_PLANS = [
+  {
+    id: "youtube-family",
+    sourceKey: "youtube-family",
+    name: "YouTube Premium Family",
+    platform: "YouTube",
+    totalSeats: 6,
+    ownerSeats: 1,
+    renewOn: "2026-07-31",
+    note: "价格来自 App Store Price 的尼日利亚 CNY 数据。",
+    seats: [
+      { slot: "1", name: "我", status: "owner", paidThrough: "2026-07-31", note: "自用" },
+      { slot: "2", status: "available" },
+      { slot: "3", status: "available" },
+      { slot: "4", status: "available" },
+      { slot: "5", status: "available" },
+      { slot: "6", status: "available" },
+    ],
+  },
+  {
+    id: "spotify-family",
+    sourceKey: "spotify-family",
+    name: "Spotify 家庭会员",
+    platform: "Spotify",
+    totalSeats: 6,
+    ownerSeats: 1,
+    renewOn: "2026-07-31",
+    note: "价格来自 App Store Price 的尼日利亚 CNY 数据。",
+    seats: [
+      { slot: "1", name: "我", status: "owner", paidThrough: "2026-07-31", note: "自用" },
+      { slot: "2", status: "available" },
+      { slot: "3", status: "available" },
+      { slot: "4", status: "available" },
+      { slot: "5", status: "available" },
+      { slot: "6", status: "available" },
+    ],
+  },
+];
 const DEFAULT_RETENTION_DAYS = 60;
 const DEFAULT_MAX_HISTORY_RECORDS = 500;
 const DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
@@ -78,6 +116,20 @@ export default {
             maxHistoryRecords: maxHistoryRecords(env),
             latest: latestRecord(records),
             records,
+          }, 200, READ_CACHE_CONTROL);
+        });
+      }
+
+      if (url.pathname === "/api/rideshare") {
+        return cachedResponse(request, ctx, async () => {
+          const records = normalizeNigeriaHistory(await loadNigeriaHistory(env), env);
+          const latest = latestRecord(records);
+          const plans = buildRideSharePlans(parseRideSharePlans(env), latest);
+          return json({
+            ok: true,
+            latestFx: latest?.fx || null,
+            summary: summarizeRideSharePlans(plans),
+            plans,
           }, 200, READ_CACHE_CONTROL);
         });
       }
@@ -1064,6 +1116,33 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     .rate-item:last-child { border-right: 0; }
     .rate-item .label { color: var(--muted); font-size: 13px; font-weight: 650; }
     .rate-item .value { margin-top: 8px; font-size: 22px; font-weight: 780; }
+    .ride-cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding: 16px;
+      border-top: 1px solid var(--line);
+    }
+    .ride-card {
+      background: #fbfcf9;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .ride-card h3 { margin: 0; font-size: 18px; }
+    .ride-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 14px;
+      margin-top: 14px;
+    }
+    .ride-metric { min-width: 0; }
+    .ride-metric .label,
+    .ride-card .label { display: block; color: var(--muted); font-size: 13px; font-weight: 700; }
+    .ride-metric .value { margin-top: 4px; font-size: 18px; font-weight: 760; line-height: 1.2; }
+    .ride-note, .legend { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .ride-note { margin-top: 12px; }
+    .legend { padding: 0 16px 14px; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { padding: 11px 16px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
     th { color: var(--muted); font-size: 12px; background: #fbfcf9; font-weight: 700; }
@@ -1071,6 +1150,8 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     .table-wrap { overflow-x: auto; }
     @media (max-width: 760px) {
       .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .ride-cards,
+      .ride-grid { grid-template-columns: 1fr; }
       .rates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .rate-item:nth-child(2) { border-right: 0; }
       main { width: min(100vw - 24px, 1120px); padding-top: 20px; }
@@ -1097,6 +1178,11 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     </section>
 
     <section class="cards">${cards}</section>
+    <section class="cards">${renderRideShareOverview(buildRideSharePlans(parseRideSharePlans(env), latest))}</section>
+    <section class="panel">
+      <div class="panel-head"><h2>拼车</h2><p class="phead-meta">用于对账、成本核算和车位状态跟踪</p></div>
+      ${renderRideShareSection(buildRideSharePlans(parseRideSharePlans(env), latest))}
+    </section>
     ${renderNigeriaRates(latest)}
     ${renderNigeriaHistory(records, items)}
     <p class="meta">月度订阅价格 · 数据来源 <a href="https://appstoreprice.org/zh" target="_blank" rel="noreferrer">App Store Price</a> · 每日更新 · 最后更新：${escapeHtml(updatedAt)}</p>
@@ -1212,6 +1298,254 @@ function renderNigeriaCards(records, items) {
       <div class="sub">${formatInteger(latest.priceNgn)} NGN · <span class="${direction}">${arrow} ${formatSignedPercent(changePercent)}</span></div>
     </article>`;
   }).join("");
+}
+
+function parseRideSharePlans(env) {
+  const source = String(env.RIDESHARE_PLANS_JSON || "").trim();
+  if (!source) {
+    return DEFAULT_RIDESHARE_PLANS;
+  }
+
+  try {
+    const parsed = JSON.parse(source);
+    return Array.isArray(parsed) ? parsed : DEFAULT_RIDESHARE_PLANS;
+  } catch {
+    return DEFAULT_RIDESHARE_PLANS;
+  }
+}
+
+function buildRideSharePlans(plans, latestNigeriaRecord) {
+  return plans.map((plan, index) => buildRideSharePlan(plan, index, latestNigeriaRecord?.items?.[plan.sourceKey] || null));
+}
+
+function buildRideSharePlan(plan, index, price) {
+  const totalSeats = Math.max(1, Number(plan.totalSeats) || 6);
+  const ownerSeats = Math.min(totalSeats, Math.max(1, Number(plan.ownerSeats) || 1));
+  const sellableSeats = Math.max(0, totalSeats - ownerSeats);
+  const priceCny = toFiniteNumber(price?.priceCny);
+  const seats = normalizeRideShareSeats(plan.seats, totalSeats, ownerSeats, priceCny, sellableSeats);
+  const occupiedExternalSeats = seats.filter((seat) => seat.status === "occupied" || seat.status === "pending").length;
+  const availableSeats = seats.filter((seat) => seat.status === "available").length;
+  const paidRevenueCny = round2(seats.reduce((sum, seat) => sum + (seat.status === "owner" ? 0 : (toFiniteNumber(seat.paidAmountCny) || 0)), 0));
+  const ownerSeatCostCny = priceCny != null ? round2(priceCny / totalSeats) : null;
+  const breakEvenPerExternalSeatCny = priceCny != null && sellableSeats > 0 ? round2(priceCny / sellableSeats) : null;
+  const suggestedPerExternalSeatCny = breakEvenPerExternalSeatCny != null ? roundUpCnyPrice(breakEvenPerExternalSeatCny) : null;
+  const expectedRevenueCny = suggestedPerExternalSeatCny != null ? round2(occupiedExternalSeats * suggestedPerExternalSeatCny) : null;
+  const outstandingCny = expectedRevenueCny != null ? round2(Math.max(0, expectedRevenueCny - paidRevenueCny)) : null;
+
+  return {
+    id: plan.id || `plan-${index + 1}`,
+    sourceKey: plan.sourceKey || "",
+    name: plan.name || `拼车计划 ${index + 1}`,
+    platform: plan.platform || "",
+    region: plan.region || "尼日利亚",
+    currency: plan.currency || "NGN",
+    billingCycle: plan.billingCycle || "monthly",
+    sourceUrl: plan.sourceUrl || rideShareSourceUrl(plan.sourceKey),
+    originalPriceText: price?.priceNgn ? `NGN ${formatInteger(price.priceNgn)}` : "",
+    priceCny,
+    totalSeats,
+    ownerSeats,
+    sellableSeats,
+    occupiedExternalSeats,
+    availableSeats,
+    renewOn: plan.renewOn || "",
+    daysUntilRenew: daysUntil(plan.renewOn),
+    note: plan.note || "",
+    ownerSeatCostCny,
+    breakEvenPerExternalSeatCny,
+    suggestedPerExternalSeatCny,
+    expectedRevenueCny,
+    paidRevenueCny,
+    outstandingCny,
+    seats,
+  };
+}
+
+function rideShareSourceUrl(sourceKey) {
+  if (sourceKey === "youtube-family") {
+    return `${NIGERIA_APPSTORE_BASE}544007664`;
+  }
+  if (sourceKey === "spotify-family") {
+    return `${NIGERIA_APPSTORE_BASE}spotify`;
+  }
+  return "";
+}
+
+function normalizeRideShareSeats(inputSeats, totalSeats, ownerSeats, priceCny, sellableSeats) {
+  const suggestedCharge = priceCny != null && sellableSeats > 0 ? roundUpCnyPrice(priceCny / sellableSeats) : null;
+  const seats = Array.isArray(inputSeats) ? inputSeats : [];
+  const normalized = [];
+
+  for (let index = 0; index < totalSeats; index += 1) {
+    const seat = seats[index] || {};
+    const status = normalizeSeatStatus(seat.status, index, ownerSeats);
+    normalized.push({
+      slot: seat.slot || String(index + 1),
+      name: seat.name || (status === "owner" ? "我" : ""),
+      status,
+      paidThrough: seat.paidThrough || "",
+      chargeCny: toFiniteNumber(seat.chargeCny) ?? (status === "owner" ? null : suggestedCharge),
+      paidAmountCny: toFiniteNumber(seat.paidAmountCny) ?? null,
+      note: seat.note || "",
+    });
+  }
+
+  return normalized;
+}
+
+function normalizeSeatStatus(status, index, ownerSeats) {
+  if (status === "owner" || status === "occupied" || status === "available" || status === "pending") {
+    return status;
+  }
+  return index < ownerSeats ? "owner" : "available";
+}
+
+function summarizeRideSharePlans(plans) {
+  const pricedPlans = plans.filter((plan) => plan.priceCny != null);
+  const upcomingDates = plans.map((plan) => plan.renewOn).filter(Boolean).sort();
+  return {
+    totalMonthlyCostCny: round2(pricedPlans.reduce((sum, plan) => sum + plan.priceCny, 0)),
+    totalSellableSeats: plans.reduce((sum, plan) => sum + plan.sellableSeats, 0),
+    totalOccupiedSeats: plans.reduce((sum, plan) => sum + plan.occupiedExternalSeats, 0),
+    totalAvailableSeats: plans.reduce((sum, plan) => sum + plan.availableSeats, 0),
+    totalOutstandingCny: summarizeOptional(plans.map((plan) => plan.outstandingCny)),
+    nextRenewOn: upcomingDates[0] || "",
+  };
+}
+
+function summarizeOptional(values) {
+  const numbers = values.filter((value) => Number.isFinite(value));
+  if (numbers.length === 0) {
+    return null;
+  }
+  return round2(numbers.reduce((sum, value) => sum + value, 0));
+}
+
+function renderRideShareOverview(plans) {
+  const summary = summarizeRideSharePlans(plans);
+  const cards = [
+    {
+      label: "拼车月成本",
+      value: summary.totalMonthlyCostCny > 0 ? formatCny(summary.totalMonthlyCostCny) : "价格读取失败",
+      sub: "按 App Store Price 尼日利亚价格汇总",
+    },
+    {
+      label: "可外拼车位",
+      value: `${summary.totalOccupiedSeats}/${summary.totalSellableSeats}`,
+      sub: `已占用 ${summary.totalOccupiedSeats} · 空位 ${summary.totalAvailableSeats}`,
+    },
+    {
+      label: "待收金额",
+      value: summary.totalOutstandingCny != null ? formatCny(summary.totalOutstandingCny) : "价格读取失败",
+      sub: summary.nextRenewOn ? `最近到期 ${formatDay(summary.nextRenewOn)}` : "补充 renewOn 后可显示最近到期日",
+    },
+  ];
+
+  return cards.map((item) => `<article class="card">
+    <div class="label">${escapeHtml(item.label)}</div>
+    <div class="value"><span class="hl">${escapeHtml(item.value)}</span></div>
+    <div class="sub">${escapeHtml(item.sub)}</div>
+  </article>`).join("");
+}
+
+function renderRideShareSection(plans) {
+  if (plans.length === 0) {
+    return `<div class="empty">暂无拼车配置。</div>`;
+  }
+
+  const cards = plans.map((plan) => renderRideSharePlanCard(plan)).join("");
+  const tables = plans.map((plan) => renderRideShareSeatTable(plan)).join("");
+  return `<div class="ride-cards">${cards}</div>
+    <div class="legend">说明：价格取自 App Store Price 尼日利亚区 CNY。自用成本 = 总价 ÷ 总座位；回本价 = 总价 ÷ 可外拼座位；建议收费 = 回本价向上取整到 0.5 元。状态：owner 自用，occupied 已上车，pending 待付款/待确认，available 空位。</div>
+    ${tables}`;
+}
+
+function renderRideSharePlanCard(plan) {
+  const renewLine = plan.renewOn
+    ? `${formatDay(plan.renewOn)}${plan.daysUntilRenew != null ? ` · ${plan.daysUntilRenew >= 0 ? `还有 ${plan.daysUntilRenew} 天` : `已过期 ${Math.abs(plan.daysUntilRenew)} 天`}` : ""}`
+    : "未填写";
+  const priceLine = plan.priceCny != null
+    ? `${plan.originalPriceText || ""}${plan.originalPriceText ? " · " : ""}${formatCny(plan.priceCny)} / 月`
+    : "价格读取失败";
+
+  return `<article class="ride-card">
+    <div class="label">${escapeHtml([plan.platform, plan.region].filter(Boolean).join(" · "))}</div>
+    <h3>${escapeHtml(plan.name)}</h3>
+    <div class="ride-grid">
+      <div class="ride-metric"><span class="label">官方标价</span><div class="value">${escapeHtml(priceLine)}</div></div>
+      <div class="ride-metric"><span class="label">续费/到期</span><div class="value">${escapeHtml(renewLine)}</div></div>
+      <div class="ride-metric"><span class="label">我的单座成本</span><div class="value">${formatMaybeCny(plan.ownerSeatCostCny)}</div></div>
+      <div class="ride-metric"><span class="label">外拼回本价</span><div class="value">${formatMaybeCny(plan.breakEvenPerExternalSeatCny)}</div></div>
+      <div class="ride-metric"><span class="label">建议收费</span><div class="value">${formatMaybeCny(plan.suggestedPerExternalSeatCny)}</div></div>
+      <div class="ride-metric"><span class="label">车位情况</span><div class="value">${plan.occupiedExternalSeats}/${plan.sellableSeats} 已上车 · ${plan.availableSeats} 空位</div></div>
+      <div class="ride-metric"><span class="label">已收 / 待收</span><div class="value">${formatMaybeCny(plan.paidRevenueCny)} / ${formatMaybeCny(plan.outstandingCny)}</div></div>
+      <div class="ride-metric"><span class="label">价格来源</span><div class="value">${plan.sourceUrl ? `<a href="${escapeHtml(plan.sourceUrl)}" target="_blank" rel="noreferrer">App Store Price</a>` : "--"}</div></div>
+    </div>
+    ${plan.note ? `<div class="ride-note">${escapeHtml(plan.note)}</div>` : ""}
+  </article>`;
+}
+
+function renderRideShareSeatTable(plan) {
+  const rows = plan.seats.map((seat) => `<tr>
+    <td>${escapeHtml(seat.slot)}</td>
+    <td>${escapeHtml(seat.name || "--")}</td>
+    <td>${escapeHtml(formatSeatStatus(seat.status))}</td>
+    <td>${seat.status === "owner" ? "自用" : formatMaybeCny(seat.chargeCny)}</td>
+    <td>${seat.status === "owner" ? "--" : formatMaybeCny(seat.paidAmountCny)}</td>
+    <td>${escapeHtml(seat.paidThrough ? formatDay(seat.paidThrough) : "--")}</td>
+    <td>${escapeHtml(seat.note || "--")}</td>
+  </tr>`).join("");
+
+  return `<div class="panel-head">
+      <h2>${escapeHtml(plan.name)} 车位明细</h2>
+      <p class="phead-meta">${plan.sellableSeats} 个外拼位</p>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>车位</th><th>成员</th><th>状态</th><th>收费标准</th><th>已收金额</th><th>有效期</th><th>备注</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function formatSeatStatus(status) {
+  return {
+    owner: "自用",
+    occupied: "已上车",
+    pending: "待确认",
+    available: "空位",
+  }[status] || status;
+}
+
+function formatMaybeCny(value) {
+  return Number.isFinite(value) ? formatCny(value) : "价格读取失败";
+}
+
+function formatCny(value) {
+  return `¥${formatMoney(value)}`;
+}
+
+function roundUpCnyPrice(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return null;
+  }
+  return Math.ceil(number * 2) / 2;
+}
+
+function daysUntil(value) {
+  if (!value) {
+    return null;
+  }
+  const target = Date.parse(value);
+  if (!Number.isFinite(target)) {
+    return null;
+  }
+  return Math.ceil((target - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+function toFiniteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function renderNigeriaTrendTabs(records, items) {
@@ -1844,6 +2178,7 @@ async function purgeReadCache(request) {
     caches.default.delete(cacheKeyFor(url, "/turkey")),
     caches.default.delete(cacheKeyFor(url, "/api/nigeria")),
     caches.default.delete(cacheKeyFor(url, "/api/history")),
+    caches.default.delete(cacheKeyFor(url, "/api/rideshare")),
   ]);
 }
 
