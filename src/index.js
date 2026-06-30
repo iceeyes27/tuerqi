@@ -1,5 +1,6 @@
 const HISTORY_KEY = "seagm:history:v1";
 const NIGERIA_HISTORY_KEY = "appstore:ng-claude:v1";
+const RIDESHARE_PLANS_KEY = "rideshare:plans:v1";
 const DEFAULT_APPSTORE_URL = "https://appstoreprice.org/zh/apps/6473753684";
 const NIGERIA_APPSTORE_BASE = "https://appstoreprice.org/zh/apps/";
 
@@ -82,7 +83,8 @@ export default {
       if (url.pathname === "/") {
         return cachedResponse(request, ctx, async () => {
           const history = await loadNigeriaHistory(env);
-          return html(renderNigeriaDashboard(history, env), 200, READ_CACHE_CONTROL);
+          const rideShareConfig = await loadRideShareConfig(env);
+          return html(renderNigeriaDashboard(history, env, rideShareConfig), 200, READ_CACHE_CONTROL);
         });
       }
 
@@ -121,14 +123,42 @@ export default {
       }
 
       if (url.pathname === "/api/rideshare") {
-        return cachedResponse(request, ctx, async () => {
+        if (request.method === "POST") {
+          if (!isAuthorizedRun(request, env)) {
+            return json({ ok: false, error: "Forbidden" }, 403);
+          }
+
+          const payload = await request.json().catch(() => null);
+          if (!Array.isArray(payload?.plans)) {
+            return json({ ok: false, error: "Invalid rideshare plans payload" }, 400);
+          }
+
+          const plansConfig = sanitizeRideSharePlans(payload.plans);
+          await saveRideShareConfig(env, plansConfig);
+          await purgeReadCache(request);
+
           const records = normalizeNigeriaHistory(await loadNigeriaHistory(env), env);
           const latest = latestRecord(records);
-          const plans = buildRideSharePlans(parseRideSharePlans(env), latest);
+          const plans = buildRideSharePlans(plansConfig, latest);
           return json({
             ok: true,
             latestFx: latest?.fx || null,
             summary: summarizeRideSharePlans(plans),
+            plansConfig,
+            plans,
+          });
+        }
+
+        return cachedResponse(request, ctx, async () => {
+          const records = normalizeNigeriaHistory(await loadNigeriaHistory(env), env);
+          const latest = latestRecord(records);
+          const plansConfig = await loadRideShareConfig(env);
+          const plans = buildRideSharePlans(plansConfig, latest);
+          return json({
+            ok: true,
+            latestFx: latest?.fx || null,
+            summary: summarizeRideSharePlans(plans),
+            plansConfig,
             plans,
           }, 200, READ_CACHE_CONTROL);
         });
@@ -962,13 +992,15 @@ function renderNav(active) {
   ).join("")}</nav>`;
 }
 
-function renderNigeriaDashboard(history, env) {
+function renderNigeriaDashboard(history, env, rideShareConfig = null) {
   const records = normalizeNigeriaHistory(history, env);
   const items = nigeriaItems(env);
   const latest = records[records.length - 1] || null;
   const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
   const cards = renderNigeriaCards(records, items);
   const trend = renderNigeriaTrendTabs(records, items);
+  const rideSharePlansConfig = rideShareConfig || parseRideSharePlans(env);
+  const rideSharePlans = buildRideSharePlans(rideSharePlansConfig, latest);
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -1143,6 +1175,21 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     .ride-note, .legend { color: var(--muted); font-size: 13px; line-height: 1.5; }
     .ride-note { margin-top: 12px; }
     .legend { padding: 0 16px 14px; }
+    .edit-actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 16px 14px; }
+    .edit-form { display: none; padding: 0 16px 16px; }
+    .edit-form.active { display: block; }
+    .edit-plan { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-top: 12px; }
+    .edit-plan-head { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; padding: 12px; background: #fbfcf9; border-bottom: 1px solid var(--line); }
+    .edit-field { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .edit-field input,
+    .edit-field select { min-height: 34px; min-width: 120px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font: inherit; background: #fff; color: var(--ink); }
+    .edit-field input[type="number"] { width: 92px; min-width: 92px; }
+    .edit-table { overflow-x: auto; }
+    .edit-table input,
+    .edit-table select { min-height: 32px; border: 1px solid var(--line); border-radius: 7px; padding: 0 8px; font: inherit; background: #fff; color: var(--ink); }
+    .edit-table input[type="number"] { width: 84px; }
+    .edit-status { padding: 0 16px 14px; color: var(--muted); font-size: 13px; }
+    .edit-status.error { color: var(--coral); }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { padding: 11px 16px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
     th { color: var(--muted); font-size: 12px; background: #fbfcf9; font-weight: 700; }
@@ -1178,16 +1225,115 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     </section>
 
     <section class="cards">${cards}</section>
-    <section class="cards">${renderRideShareOverview(buildRideSharePlans(parseRideSharePlans(env), latest))}</section>
+    <section class="cards">${renderRideShareOverview(rideSharePlans)}</section>
     <section class="panel">
       <div class="panel-head"><h2>拼车</h2><p class="phead-meta">用于对账、成本核算和车位状态跟踪</p></div>
-      ${renderRideShareSection(buildRideSharePlans(parseRideSharePlans(env), latest))}
+      ${renderRideShareSection(rideSharePlans, rideSharePlansConfig)}
     </section>
     ${renderNigeriaRates(latest)}
     ${renderNigeriaHistory(records, items)}
     <p class="meta">月度订阅价格 · 数据来源 <a href="https://appstoreprice.org/zh" target="_blank" rel="noreferrer">App Store Price</a> · 每日更新 · 最后更新：${escapeHtml(updatedAt)}</p>
   </main>
   <script>${TREND_TABS_SCRIPT}
+    const rideShareInitialPlans = ${scriptJson(rideSharePlansConfig)};
+    const rideShareForm = document.querySelector("[data-rideshare-form]");
+    const rideShareStatus = document.querySelector("[data-rideshare-status]");
+    const rideShareEditBtn = document.querySelector("[data-rideshare-edit]");
+    const rideShareSaveBtn = document.querySelector("[data-rideshare-save]");
+    const rideShareCancelBtn = document.querySelector("[data-rideshare-cancel]");
+    const setRideShareStatus = (message, isError = false) => {
+      if (!rideShareStatus) return;
+      rideShareStatus.textContent = message || "";
+      rideShareStatus.classList.toggle("error", Boolean(isError));
+    };
+    const resetRideShareForm = () => {
+      rideShareInitialPlans.forEach((plan, planIndex) => {
+        const root = document.querySelector('[data-plan-index="' + planIndex + '"]');
+        root?.querySelectorAll("[data-plan-field]").forEach((input) => {
+          input.value = (plan[input.dataset.planField] ?? "").toString();
+        });
+        plan.seats.forEach((seat, seatIndex) => {
+          const row = root?.querySelector('[data-seat-index="' + seatIndex + '"]');
+          row?.querySelectorAll("[data-seat-field]").forEach((input) => {
+            const field = input.dataset.seatField;
+            const value = field === "chargeCny" || field === "paidAmountCny"
+              ? formatInputNumber(seat[field])
+              : (seat[field] ?? "").toString();
+            input.value = value;
+          });
+        });
+      });
+    };
+    rideShareEditBtn?.addEventListener("click", () => {
+      rideShareForm?.classList.add("active");
+      rideShareEditBtn.disabled = true;
+      setRideShareStatus("修改后点击保存。首次保存需要输入 RUN_TOKEN。");
+    });
+    rideShareCancelBtn?.addEventListener("click", () => {
+      resetRideShareForm();
+      rideShareForm?.classList.remove("active");
+      if (rideShareEditBtn) rideShareEditBtn.disabled = false;
+      setRideShareStatus("");
+    });
+    const readMoneyInput = (input) => {
+      const value = input?.value?.trim();
+      if (!value) return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+    const collectRideSharePlans = () => rideShareInitialPlans.map((plan, planIndex) => {
+      const root = document.querySelector('[data-plan-index="' + planIndex + '"]');
+      const nextPlan = { ...plan };
+      root?.querySelectorAll("[data-plan-field]").forEach((input) => {
+        nextPlan[input.dataset.planField] = input.value.trim();
+      });
+      nextPlan.seats = plan.seats.map((seat, seatIndex) => {
+        const row = root?.querySelector('[data-seat-index="' + seatIndex + '"]');
+        const nextSeat = { ...seat };
+        row?.querySelectorAll("[data-seat-field]").forEach((input) => {
+          const field = input.dataset.seatField;
+          nextSeat[field] = field === "chargeCny" || field === "paidAmountCny" ? readMoneyInput(input) : input.value.trim();
+        });
+        return nextSeat;
+      });
+      return nextPlan;
+    });
+    rideShareSaveBtn?.addEventListener("click", async () => {
+      let token = localStorage.getItem("ng_run_token") || "";
+      if (!token) {
+        token = (window.prompt("请输入 RUN_TOKEN（用于保存拼车信息）") || "").trim();
+        if (!token) return;
+        localStorage.setItem("ng_run_token", token);
+      }
+      const original = rideShareSaveBtn.textContent;
+      rideShareSaveBtn.disabled = true;
+      rideShareSaveBtn.textContent = "保存中…";
+      setRideShareStatus("保存中…");
+      try {
+        const res = await fetch("/api/rideshare?token=" + encodeURIComponent(token), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ plans: collectRideSharePlans() }),
+        });
+        if (res.status === 403) {
+          localStorage.removeItem("ng_run_token");
+          setRideShareStatus("RUN_TOKEN 无效，请重新保存并输入。", true);
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          setRideShareStatus("保存失败：" + (data.error || ("HTTP " + res.status)), true);
+          return;
+        }
+        setRideShareStatus("保存成功，正在刷新…");
+        window.location.reload();
+      } catch (error) {
+        setRideShareStatus("请求出错：" + error.message, true);
+      } finally {
+        rideShareSaveBtn.disabled = false;
+        rideShareSaveBtn.textContent = original;
+      }
+    });
     const scrapeBtn = document.querySelector("[data-scrape]");
     scrapeBtn?.addEventListener("click", async () => {
       let token = localStorage.getItem("ng_run_token") || "";
@@ -1300,18 +1446,82 @@ function renderNigeriaCards(records, items) {
   }).join("");
 }
 
+async function loadRideShareConfig(env) {
+  assertKv(env);
+  const saved = await env.PRICE_HISTORY.get(RIDESHARE_PLANS_KEY, "json");
+  if (Array.isArray(saved)) {
+    return sanitizeRideSharePlans(saved);
+  }
+  return parseRideSharePlans(env);
+}
+
+async function saveRideShareConfig(env, plans) {
+  assertKv(env);
+  await env.PRICE_HISTORY.put(RIDESHARE_PLANS_KEY, JSON.stringify(sanitizeRideSharePlans(plans)));
+}
+
 function parseRideSharePlans(env) {
   const source = String(env.RIDESHARE_PLANS_JSON || "").trim();
   if (!source) {
-    return DEFAULT_RIDESHARE_PLANS;
+    return sanitizeRideSharePlans(DEFAULT_RIDESHARE_PLANS);
   }
 
   try {
     const parsed = JSON.parse(source);
-    return Array.isArray(parsed) ? parsed : DEFAULT_RIDESHARE_PLANS;
+    return sanitizeRideSharePlans(Array.isArray(parsed) ? parsed : DEFAULT_RIDESHARE_PLANS);
   } catch {
-    return DEFAULT_RIDESHARE_PLANS;
+    return sanitizeRideSharePlans(DEFAULT_RIDESHARE_PLANS);
   }
+}
+
+function sanitizeRideSharePlans(input) {
+  const plans = Array.isArray(input) && input.length > 0 ? input : DEFAULT_RIDESHARE_PLANS;
+  return plans.map((plan, index) => {
+    const totalSeats = Math.max(1, Math.min(20, Math.round(Number(plan.totalSeats) || 6)));
+    const ownerSeats = Math.min(totalSeats, Math.max(1, Math.round(Number(plan.ownerSeats) || 1)));
+    return {
+      id: safeText(plan.id || `plan-${index + 1}`, 80),
+      sourceKey: safeText(plan.sourceKey || "", 80),
+      name: safeText(plan.name || `拼车计划 ${index + 1}`, 120),
+      platform: safeText(plan.platform || "", 80),
+      region: safeText(plan.region || "尼日利亚", 80),
+      currency: safeText(plan.currency || "NGN", 16),
+      billingCycle: safeText(plan.billingCycle || "monthly", 32),
+      sourceUrl: safeText(plan.sourceUrl || "", 300),
+      totalSeats,
+      ownerSeats,
+      renewOn: safeDate(plan.renewOn),
+      note: safeText(plan.note || "", 300),
+      seats: sanitizeRideShareSeats(plan.seats, totalSeats, ownerSeats),
+    };
+  });
+}
+
+function sanitizeRideShareSeats(inputSeats, totalSeats, ownerSeats) {
+  const seats = Array.isArray(inputSeats) ? inputSeats : [];
+  return Array.from({ length: totalSeats }, (_, index) => {
+    const seat = seats[index] || {};
+    const status = normalizeSeatStatus(seat.status, index, ownerSeats);
+    return {
+      slot: safeText(seat.slot || String(index + 1), 16),
+      name: safeText(seat.name || (status === "owner" ? "我" : ""), 80),
+      status,
+      onboardedAt: safeDate(seat.onboardedAt),
+      paidThrough: safeDate(seat.paidThrough),
+      chargeCny: toFiniteNumber(seat.chargeCny),
+      paidAmountCny: toFiniteNumber(seat.paidAmountCny),
+      note: safeText(seat.note || "", 160),
+    };
+  });
+}
+
+function safeText(value, maxLength) {
+  return String(value || "").trim().slice(0, maxLength);
+}
+
+function safeDate(value) {
+  const text = safeText(value, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
 }
 
 function buildRideSharePlans(plans, latestNigeriaRecord) {
@@ -1384,6 +1594,7 @@ function normalizeRideShareSeats(inputSeats, totalSeats, ownerSeats, priceCny, s
       slot: seat.slot || String(index + 1),
       name: seat.name || (status === "owner" ? "我" : ""),
       status,
+      onboardedAt: seat.onboardedAt || "",
       paidThrough: seat.paidThrough || "",
       chargeCny: toFiniteNumber(seat.chargeCny) ?? (status === "owner" ? null : suggestedCharge),
       paidAmountCny: toFiniteNumber(seat.paidAmountCny) ?? null,
@@ -1449,7 +1660,7 @@ function renderRideShareOverview(plans) {
   </article>`).join("");
 }
 
-function renderRideShareSection(plans) {
+function renderRideShareSection(plans, plansConfig = plans) {
   if (plans.length === 0) {
     return `<div class="empty">暂无拼车配置。</div>`;
   }
@@ -1458,7 +1669,79 @@ function renderRideShareSection(plans) {
   const tables = plans.map((plan) => renderRideShareSeatTable(plan)).join("");
   return `<div class="ride-cards">${cards}</div>
     <div class="legend">说明：价格取自 App Store Price 尼日利亚区 CNY。自用成本 = 总价 ÷ 总座位；回本价 = 总价 ÷ 可外拼座位；建议收费 = 回本价向上取整到 0.5 元。状态：owner 自用，occupied 已上车，pending 待付款/待确认，available 空位。</div>
+    <div class="edit-actions">
+      <button class="btn" type="button" data-rideshare-edit>编辑拼车</button>
+      <a class="btn" href="/api/rideshare">拼车 JSON</a>
+    </div>
+    ${renderRideShareEditForm(plansConfig)}
+    <div class="edit-status" data-rideshare-status></div>
     ${tables}`;
+}
+
+function renderRideShareEditForm(plansConfig) {
+  const plans = sanitizeRideSharePlans(plansConfig);
+  const planForms = plans.map((plan, planIndex) => {
+    const rows = plan.seats.map((seat, seatIndex) => `<tr data-seat-index="${seatIndex}">
+      <td>${escapeHtml(seat.slot)}</td>
+      <td><input data-seat-field="name" value="${escapeAttr(seat.name)}" placeholder="成员" /></td>
+      <td><select data-seat-field="status">
+        ${renderSeatStatusOptions(seat.status)}
+      </select></td>
+      <td><input data-seat-field="onboardedAt" type="date" value="${escapeAttr(seat.onboardedAt)}" /></td>
+      <td><input data-seat-field="paidThrough" type="date" value="${escapeAttr(seat.paidThrough)}" /></td>
+      <td><input data-seat-field="chargeCny" type="number" step="0.01" min="0" value="${formatInputNumber(seat.chargeCny)}" /></td>
+      <td><input data-seat-field="paidAmountCny" type="number" step="0.01" min="0" value="${formatInputNumber(seat.paidAmountCny)}" /></td>
+      <td><input data-seat-field="note" value="${escapeAttr(seat.note)}" placeholder="备注" /></td>
+    </tr>`).join("");
+
+    return `<section class="edit-plan" data-plan-index="${planIndex}">
+      <div class="edit-plan-head">
+        <strong>${escapeHtml(plan.name)}</strong>
+        <label class="edit-field">续费/到期
+          <input data-plan-field="renewOn" type="date" value="${escapeAttr(plan.renewOn)}" />
+        </label>
+        <label class="edit-field">备注
+          <input data-plan-field="note" value="${escapeAttr(plan.note)}" />
+        </label>
+      </div>
+      <div class="edit-table"><table>
+        <thead><tr><th>车位</th><th>成员</th><th>状态</th><th>上车时间</th><th>有效期到</th><th>收费</th><th>已收</th><th>备注</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+    </section>`;
+  }).join("");
+
+  return `<div class="edit-form" data-rideshare-form>
+    ${planForms}
+    <div class="edit-actions">
+      <button class="btn primary" type="button" data-rideshare-save>保存拼车</button>
+      <button class="btn" type="button" data-rideshare-cancel>取消</button>
+    </div>
+  </div>`;
+}
+
+function renderSeatStatusOptions(current) {
+  const options = [
+    ["owner", "自用"],
+    ["occupied", "已上车"],
+    ["pending", "待确认"],
+    ["available", "空位"],
+  ];
+  return options.map(([value, label]) =>
+    `<option value="${value}"${value === current ? " selected" : ""}>${label}</option>`
+  ).join("");
+}
+
+function formatInputNumber(value) {
+  return Number.isFinite(value) ? String(value) : "";
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/'/g, "&#39;");
+}
+
+function scriptJson(value) {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 function renderRideSharePlanCard(plan) {
@@ -1493,6 +1776,7 @@ function renderRideShareSeatTable(plan) {
     <td>${escapeHtml(formatSeatStatus(seat.status))}</td>
     <td>${seat.status === "owner" ? "自用" : formatMaybeCny(seat.chargeCny)}</td>
     <td>${seat.status === "owner" ? "--" : formatMaybeCny(seat.paidAmountCny)}</td>
+    <td>${escapeHtml(seat.onboardedAt ? formatDay(seat.onboardedAt) : "--")}</td>
     <td>${escapeHtml(seat.paidThrough ? formatDay(seat.paidThrough) : "--")}</td>
     <td>${escapeHtml(seat.note || "--")}</td>
   </tr>`).join("");
@@ -1502,7 +1786,7 @@ function renderRideShareSeatTable(plan) {
       <p class="phead-meta">${plan.sellableSeats} 个外拼位</p>
     </div>
     <div class="table-wrap"><table>
-      <thead><tr><th>车位</th><th>成员</th><th>状态</th><th>收费标准</th><th>已收金额</th><th>有效期</th><th>备注</th></tr></thead>
+      <thead><tr><th>车位</th><th>成员</th><th>状态</th><th>收费标准</th><th>已收金额</th><th>上车时间</th><th>有效期到</th><th>备注</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
 }
@@ -1544,6 +1828,9 @@ function daysUntil(value) {
 }
 
 function toFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }

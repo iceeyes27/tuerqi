@@ -131,7 +131,7 @@ DENOMS = "500,1000,2000"
 拼车板块分成两部分：
 
 1. **订阅价格**：复用尼日利亚订阅监控的每日 CNY 数据。
-2. **对账信息**：由 `RIDESHARE_PLANS_JSON` 维护车位、到期日、已收金额。
+2. **对账信息**：优先从 KV 的 `rideshare:plans:v1` 读取线上编辑后的配置；如果 KV 里还没有数据，再回退到 `RIDESHARE_PLANS_JSON` / 默认配置。
 
 当前默认接入来源：
 
@@ -155,7 +155,8 @@ DENOMS = "500,1000,2000"
 - `slot`
 - `name`
 - `status`: `owner | occupied | pending | available`
-- `paidThrough`
+- `onboardedAt`（上车时间）
+- `paidThrough`（有效期 / 付费到）
 - `chargeCny`
 - `paidAmountCny`
 - `note`
@@ -175,7 +176,7 @@ RIDESHARE_PLANS_JSON = '''
     "renewOn": "2026-07-31",
     "seats": [
       { "slot": "1", "name": "我", "status": "owner" },
-      { "slot": "2", "name": "A", "status": "occupied", "paidThrough": "2026-07-31", "paidAmountCny": 2.5 },
+      { "slot": "2", "name": "A", "status": "occupied", "onboardedAt": "2026-07-01", "paidThrough": "2026-07-31", "paidAmountCny": 2.5 },
       { "slot": "3", "status": "available" }
     ]
   }
@@ -191,6 +192,17 @@ RIDESHARE_PLANS_JSON = '''
 - 建议收费 = 回本价向上取整到 `0.5` 元
 - 已收 / 待收金额
 - 已占用 / 空余车位数
+
+页面提供“编辑拼车”按钮，可直接在首页修改车位状态、成员、上车时间、有效期、收费和已收金额。保存会写入 KV，需要和 `/run` 相同的 `RUN_TOKEN` 授权：
+
+```sh
+curl -X POST -H 'Authorization: Bearer <RUN_TOKEN>' \
+  -H 'Content-Type: application/json' \
+  --data '{"plans":[...]}' \
+  'https://tuerqi.littlelittlepony.workers.dev/api/rideshare'
+```
+
+保存成功后会清理 `/` 和 `/api/rideshare` 等读缓存。
 
 说明：
 
@@ -212,11 +224,12 @@ Turkey page:
 https://tuerqi.littlelittlepony.workers.dev/turkey
 ```
 
-JSON history (Nigeria / Turkey):
+JSON history / config (Nigeria / Turkey / rideshare):
 
 ```text
 https://tuerqi.littlelittlepony.workers.dev/api/nigeria
 https://tuerqi.littlelittlepony.workers.dev/api/history
+https://tuerqi.littlelittlepony.workers.dev/api/rideshare
 ```
 
 Manual scrape and save with token:
@@ -236,8 +249,8 @@ https://tuerqi.littlelittlepony.workers.dev/run?dry=1
 - Nigeria: the Worker parses the embedded JSON on each App Store Price page and records the site's daily NG `priceCny` for every tracked monthly subscription (matched by plan name). Subscriptions are defined in `nigeriaItems()` in `src/index.js`. Only one record is kept per Asia/Shanghai day (a later read the same day overwrites the earlier one), and each record holds all subscriptions under an `items` map. Legacy single-Claude records are migrated to this shape on read.
 - Turkey: the Worker reads the Chinese/CNY SEAGM page directly and records the displayed discounted CNY price, not an inferred FX conversion.
 - When saving Turkey snapshots, duplicates with identical source, FX, and price data inside a 6-hour window are compacted so only the latest copy remains.
-- Data is stored in Cloudflare KV under `appstore:ng-claude:v1` (Nigeria) and `seagm:history:v1` (Turkey).
-- `/`, `/turkey`, `/api/nigeria`, and `/api/history` are cached at the Cloudflare edge for 60 seconds to reduce KV reads and HTML/SVG rendering work.
+- Data is stored in Cloudflare KV under `appstore:ng-claude:v1` (Nigeria), `seagm:history:v1` (Turkey), and `rideshare:plans:v1` (editable ride-sharing config).
+- `/`, `/turkey`, `/api/nigeria`, `/api/history`, and `/api/rideshare` are cached at the Cloudflare edge for 60 seconds to reduce KV reads and HTML/SVG rendering work.
 - History is pruned by both `RETENTION_DAYS` and `MAX_HISTORY_RECORDS` to keep the KV value bounded.
 
 Relevant docs:
