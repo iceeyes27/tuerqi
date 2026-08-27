@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "trigger": "wrangler dev --test-scheduled"
+    "trigger": "wrangler dev --test-scheduled",
+    "test": "node --test"
   },
   "devDependencies": {
     "wrangler": "^4.87.0"

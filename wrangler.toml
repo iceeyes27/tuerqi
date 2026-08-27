@@ -7,7 +7,6 @@ crons = ["0 0 * * *", "0 6 * * *"]
 
 [vars]
 SEAGM_URL = "https://www.seagm.com/zh-cn/itunes-gift-card-turkey?item_id=16820"
-APPSTORE_URL = "https://appstoreprice.org/zh/apps/6473753684"
 DENOMS = "500,1000,2000"
 RETENTION_DAYS = "60"
 MAX_HISTORY_RECORDS = "500"

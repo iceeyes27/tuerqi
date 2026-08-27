@@ -1,11 +1,11 @@
 # Price Monitor
 
-Cloudflare Worker Cron job that tracks two CNY price series and shows them on the Worker page:
+Cloudflare Worker Cron job that tracks currency conversions and regional prices on two Worker pages:
 
-- **`/` (default) — 尼日利亚订阅**: monthly App Store subscription prices in Nigeria, converted to CNY, sourced from [App Store Price](https://appstoreprice.org/zh). Tracks Claude Pro, YouTube Premium (单人 / 家庭), and Spotify (个人 / 家庭). Each subscription gets its own trend tab, current-price card, and history column. Captured once per day (one point per Asia/Shanghai calendar day).
+- **`/` (default) — 跨区汇率与订阅**: Google Finance conversions for `139.9 BOB → CNY` and `9010 PHP → USD / CNY`, plus Nigeria App Store prices for YouTube Premium and Spotify. Currency groups and subscriptions have separate cards and trend tabs.
 - **`/turkey` — 土区礼品卡**: SEAGM Turkey iTunes gift card CNY prices, compared against the Google Finance TRY/CNY rate.
 
-Both pages share a top nav so you can switch between them. Data is stored in Cloudflare KV and rendered directly by the Worker.
+Both pages share a top nav so you can switch between them. Data is stored in Cloudflare KV and rendered directly by the Worker. The default page keeps one point per Asia/Shanghai calendar day and displays the capture time in history.
 
 ## What It Captures (Turkey)
 
@@ -193,7 +193,7 @@ RIDESHARE_PLANS_JSON = '''
 - 已收 / 待收金额
 - 已占用 / 空余车位数
 
-页面提供“编辑拼车”按钮，可直接在首页修改车位状态、成员、上车时间、有效期、收费和已收金额。保存会写入 KV，需要和 `/run` 相同的 `RUN_TOKEN` 授权：
+页面保留拼车汇总和“编辑拼车”功能，不显示只读车位明细表。“编辑拼车”可修改车位状态、成员、上车时间、有效期、收费和已收金额。保存会写入 KV，需要和 `/run` 相同的 `RUN_TOKEN` 授权：
 
 ```sh
 curl -X POST -H 'Authorization: Bearer <RUN_TOKEN>' \
@@ -246,10 +246,11 @@ https://tuerqi.littlelittlepony.workers.dev/run?dry=1
 
 ## Notes
 
-- Nigeria: the Worker parses the embedded JSON on each App Store Price page and records the site's daily NG `priceCny` for every tracked monthly subscription (matched by plan name). Subscriptions are defined in `nigeriaItems()` in `src/index.js`. Only one record is kept per Asia/Shanghai day (a later read the same day overwrites the earlier one), and each record holds all subscriptions under an `items` map. Legacy single-Claude records are migrated to this shape on read.
+- Default dashboard: Google Finance supplies direct `BOB/CNY`, `PHP/USD`, and `PHP/CNY` rates. The Worker stores the unit rate, fixed input amount, converted amount, source URL, and capture time. App Store Price supplies Nigeria YouTube and Spotify subscription prices. Each source can fail independently without suppressing successful values from the other source.
+- Legacy Claude data remains in existing KV records for compatibility, but is not fetched, rendered, or returned by `/api/nigeria`.
 - Turkey: the Worker reads the Chinese/CNY SEAGM page directly and records the displayed discounted CNY price, not an inferred FX conversion.
 - When saving Turkey snapshots, duplicates with identical source, FX, and price data inside a 6-hour window are compacted so only the latest copy remains.
-- Data is stored in Cloudflare KV under `appstore:ng-claude:v1` (Nigeria), `seagm:history:v1` (Turkey), and `rideshare:plans:v1` (editable ride-sharing config).
+- Data is stored in Cloudflare KV under the backward-compatible `appstore:ng-claude:v1` key (default dashboard), `seagm:history:v1` (Turkey), and `rideshare:plans:v1` (editable ride-sharing config).
 - `/`, `/turkey`, `/api/nigeria`, `/api/history`, and `/api/rideshare` are cached at the Cloudflare edge for 60 seconds to reduce KV reads and HTML/SVG rendering work.
 - History is pruned by both `RETENTION_DAYS` and `MAX_HISTORY_RECORDS` to keep the KV value bounded.
 
