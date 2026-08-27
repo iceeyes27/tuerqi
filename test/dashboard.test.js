@@ -11,7 +11,7 @@ globalThis.caches = {
 
 const worker = (await import("../src/index.js")).default;
 
-function testEnvironment({ omitItems = [] } = {}) {
+function testEnvironment({ omitItems = [], omitTurkeyDenoms = [] } = {}) {
   const capturedAt = new Date().toISOString();
   const history = [{
     capturedAt,
@@ -59,6 +59,15 @@ function testEnvironment({ omitItems = [] } = {}) {
     },
   }];
   omitItems.forEach((key) => delete history[0].items[key]);
+  const earlierDashboardRecord = structuredClone(history[0]);
+  earlierDashboardRecord.capturedAt = new Date(Date.parse(capturedAt) - 24 * 60 * 60 * 1000).toISOString();
+  Object.values(earlierDashboardRecord.items).forEach((price) => {
+    price.priceCny = Math.max(0.01, price.priceCny - 0.5);
+  });
+  Object.values(earlierDashboardRecord.conversions).forEach((conversion) => {
+    conversion.convertedAmount = Math.max(0.01, conversion.convertedAmount - 0.5);
+  });
+  history.unshift(earlierDashboardRecord);
   const turkeyHistory = [{
     capturedAt,
     sourceUrl: "https://www.seagm.com/zh-cn/itunes-gift-card-turkey",
@@ -67,18 +76,24 @@ function testEnvironment({ omitItems = [] } = {}) {
       source: "Google Finance",
       rateCnyPerTry: 0.17,
     },
-    prices: [{
-      denomTl: 500,
-      priceCny: 95,
-      originalPriceCny: 100,
+    prices: [
+      { denomTl: 500, priceCny: 95, originalPriceCny: 100, googlePriceCny: 85, googlePremiumCny: 10, googlePremiumPercent: 11.76, credits: 5513 },
+      { denomTl: 1000, priceCny: 185, originalPriceCny: 195, googlePriceCny: 170, googlePremiumCny: 15, googlePremiumPercent: 8.82, credits: 10736 },
+      { denomTl: 2000, priceCny: 360, originalPriceCny: 380, googlePriceCny: 340, googlePremiumCny: 20, googlePremiumPercent: 5.88, credits: 20892 },
+    ].filter((price) => !omitTurkeyDenoms.includes(price.denomTl)).map((price) => ({
+      ...price,
       discountPercent: 5,
-      credits: 5513,
       available: true,
-      googlePriceCny: 85,
-      googlePremiumCny: 10,
-      googlePremiumPercent: 11.76,
-    }],
+    })),
   }];
+  const earlierTurkeyRecord = structuredClone(turkeyHistory[0]);
+  earlierTurkeyRecord.capturedAt = earlierDashboardRecord.capturedAt;
+  earlierTurkeyRecord.prices.forEach((price) => {
+    price.priceCny -= 1;
+    price.originalPriceCny -= 1;
+    price.googlePremiumCny -= 1;
+  });
+  turkeyHistory.unshift(earlierTurkeyRecord);
 
   return {
     PRICE_HISTORY: {
@@ -108,19 +123,32 @@ test("renders separate Bolivia and Philippines cards and omits seat detail table
   assert.match(body, /US\$146\.13/);
   assert.match(body, /¥982\.41/);
   assert.match(body, /编辑拼车/);
+  assert.match(body, /\.trend-tabs \{[^}]*flex-wrap: nowrap;/);
+  assert.match(body, />玻利维亚<\/button>.*>菲律宾<\/button>.*>YouTube<\/button>.*>Spotify<\/button>.*>土耳其礼品卡<\/button>/);
   assert.match(body, /data-trend-tab[^>]*>YouTube<\/button>/);
   assert.match(body, /data-trend-tab[^>]*>Spotify<\/button>/);
-  assert.equal((body.match(/aria-controls="ng-trend-/g) || []).length, 4);
+  assert.equal((body.match(/aria-controls="ng-trend-/g) || []).length, 5);
   assert.match(body, /data-combined-chart="trend-ng-group-2"/);
   assert.match(body, /data-series="youtube-solo" data-series-color="#e0513b"/);
   assert.match(body, /data-series="youtube-family" data-series-color="#2f68b8"/);
   assert.match(body, /data-series="spotify-solo" data-series-color="#1db954"/);
   assert.match(body, /data-series="spotify-family" data-series-color="#7a4db3"/);
-  assert.match(body, /id="turkey-gift-cards"/);
-  assert.match(body, /土耳其礼品卡/);
+  assert.match(body, /data-trend-key="turkey-gift-cards"/);
+  assert.match(body, /data-combined-chart="trend-turkey-4"/);
+  assert.match(body, /data-series="turkey-500" data-series-color="#1e7c63"/);
+  assert.match(body, /data-series="turkey-1000" data-series-color="#2f68b8"/);
+  assert.match(body, /data-series="turkey-2000" data-series-color="#a86912"/);
+  assert.match(body, /<polyline data-series="turkey-500"/);
+  assert.match(body, /<polyline data-series="turkey-1000"/);
+  assert.match(body, /<polyline data-series="turkey-2000"/);
   assert.match(body, /500 TL/);
+  assert.match(body, /1000 TL/);
+  assert.match(body, /2000 TL/);
   assert.match(body, /¥95/);
-  assert.ok(body.indexOf('id="turkey-gift-cards"') > body.indexOf("汇率来源"));
+  assert.doesNotMatch(body, /aria-controls="trend-panel-/);
+  assert.doesNotMatch(body, /href="\/#turkey-gift-cards"/);
+  assert.doesNotMatch(body, /<section id="turkey-gift-cards"/);
+  assert.match(body, /window\.location\.hash\.slice\(1\)/);
   assert.doesNotMatch(body, /Claude Pro/);
   assert.doesNotMatch(body, /车位明细/);
 });
@@ -140,7 +168,7 @@ test("keeps a combined subscription chart when one plan has no data", async () =
   assert.match(body, /YT 家庭 最新 <strong>--<\/strong>/);
 });
 
-test("redirects the retired Turkey page to the homepage section", async () => {
+test("redirects the retired Turkey page to the homepage tab", async () => {
   const response = await worker.fetch(
     new Request("https://example.test/turkey"),
     testEnvironment(),
@@ -149,6 +177,22 @@ test("redirects the retired Turkey page to the homepage section", async () => {
 
   assert.equal(response.status, 302);
   assert.equal(response.headers.get("location"), "/#turkey-gift-cards");
+});
+
+test("keeps the Turkey combined chart when one denomination has no data", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/"),
+    testEnvironment({ omitTurkeyDenoms: [1000] }),
+    executionContext,
+  );
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(body, /data-combined-chart="trend-turkey-4"/);
+  assert.match(body, /data-series="turkey-500"/);
+  assert.doesNotMatch(body, /data-series="turkey-1000"/);
+  assert.match(body, /data-series="turkey-2000"/);
+  assert.match(body, /1000 TL 最新 <strong>--<\/strong>/);
 });
 
 test("publishes conversion metadata while hiding legacy Claude data", async () => {

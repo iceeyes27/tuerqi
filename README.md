@@ -4,7 +4,7 @@ Cloudflare Worker Cron job that tracks currency conversions and regional prices 
 
 - **`/` — 跨区汇率、订阅与土耳其礼品卡**: Google Finance conversions for `139.9 BOB → CNY` and `9010 PHP → USD / CNY`, Nigeria App Store prices for YouTube Premium and Spotify, and SEAGM Turkey iTunes gift card CNY prices compared with Google Finance TRY/CNY.
 
-YouTube single/family prices share one two-line chart, and Spotify individual/family prices share another. The Turkey section appears last on the homepage; `/turkey` redirects to that section. Data is stored in Cloudflare KV and rendered directly by the Worker. Subscription history keeps one point per Asia/Shanghai calendar day and displays the capture time in history.
+The dashboard uses one five-tab trend bar: Bolivia, Philippines, YouTube, Spotify, and Turkey gift cards. YouTube single/family prices share one two-line chart, Spotify individual/family prices share another, and Turkey `500 / 1000 / 2000 TL` prices share one three-line chart. `/turkey` redirects to the homepage and opens the Turkey tab. Data is stored in Cloudflare KV and rendered directly by the Worker. Subscription history keeps one point per Asia/Shanghai calendar day and displays the capture time in history.
 
 ## What It Captures (Turkey)
 
@@ -217,7 +217,7 @@ Production dashboard:
 https://tuerqi.littlelittlepony.workers.dev/
 ```
 
-Turkey section compatibility URL:
+Turkey tab compatibility URL:
 
 ```text
 https://tuerqi.littlelittlepony.workers.dev/turkey
@@ -250,7 +250,7 @@ https://tuerqi.littlelittlepony.workers.dev/run?dry=1
 - Turkey: the Worker reads the Chinese/CNY SEAGM page directly and records the displayed discounted CNY price, not an inferred FX conversion.
 - When saving Turkey snapshots, duplicates with identical source, FX, and price data inside a 6-hour window are compacted so only the latest copy remains.
 - Data is stored in Cloudflare KV under the backward-compatible `appstore:ng-claude:v1` key (default dashboard), `seagm:history:v1` (Turkey), and `rideshare:plans:v1` (editable ride-sharing config).
-- `/`, `/api/nigeria`, `/api/history`, and `/api/rideshare` are cached at the Cloudflare edge for 60 seconds to reduce KV reads and HTML/SVG rendering work. `/turkey` is an uncached redirect to the homepage section.
+- `/`, `/api/nigeria`, `/api/history`, and `/api/rideshare` are cached at the Cloudflare edge for 60 seconds to reduce KV reads and HTML/SVG rendering work. `/turkey` is an uncached redirect that opens the homepage Turkey tab.
 - History is pruned by both `RETENTION_DAYS` and `MAX_HISTORY_RECORDS` to keep the KV value bounded.
 
 Relevant docs:

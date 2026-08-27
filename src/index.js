@@ -23,6 +23,8 @@ const SUBSCRIPTION_TREND_GROUPS = [
   { key: "youtube", label: "YouTube", itemKeys: ["youtube-solo", "youtube-family"], color: "#e0513b" },
   { key: "spotify", label: "Spotify", itemKeys: ["spotify-solo", "spotify-family"], color: "#1db954" },
 ];
+const TURKEY_TREND_GROUP = { key: "turkey-gift-cards", label: "土耳其礼品卡", color: "#a86912" };
+const TURKEY_DENOM_COLORS = ["#1e7c63", "#2f68b8", "#a86912"];
 const CURRENCY_CONVERSIONS = [
   {
     key: "bolivia-bob-cny",
@@ -56,8 +58,8 @@ const CURRENCY_CONVERSIONS = [
   },
 ];
 const CURRENCY_CONVERSION_GROUPS = [
-  { key: "bolivia", label: "玻利维亚 139.9 BOB", color: "#2f68b8" },
-  { key: "philippines", label: "菲律宾 9010 PHP", color: "#8a5cc2" },
+  { key: "bolivia", label: "玻利维亚", color: "#2f68b8" },
+  { key: "philippines", label: "菲律宾", color: "#8a5cc2" },
 ];
 const DEFAULT_RIDESHARE_PLANS = [
   {
@@ -982,31 +984,6 @@ function stableStringify(value) {
   return JSON.stringify(value);
 }
 
-const NAV_STYLE = `
-    .nav {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 22px;
-    }
-    .nav a {
-      display: inline-flex;
-      align-items: center;
-      min-height: 38px;
-      padding: 0 16px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--panel);
-      color: var(--muted);
-      text-decoration: none;
-      font-size: 14px;
-      font-weight: 700;
-    }
-    .nav a.active {
-      background: var(--green);
-      border-color: var(--green);
-      color: #ffffff;
-    }`;
-
 const CHART_STYLE = `
     svg.trend { display: block; width: 100%; min-width: 640px; height: auto; }
     .ng-point { outline: none; }
@@ -1020,9 +997,10 @@ const TREND_TABS_STYLE = `
     .chart-wrap { padding: 16px 16px 8px; overflow-x: auto; }
     .trend-tabs {
       display: flex;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       gap: 8px;
       padding: 14px 16px 10px;
+      overflow-x: auto;
     }
     .trend-tabs button {
       display: inline-flex;
@@ -1037,6 +1015,7 @@ const TREND_TABS_STYLE = `
       font-size: 13px;
       font-weight: 750;
       cursor: pointer;
+      flex: none;
     }
     .trend-tabs button.active {
       border-color: currentColor;
@@ -1071,38 +1050,33 @@ const TREND_TABS_SCRIPT = `
       const buttons = [...tabs.querySelectorAll("[data-trend-tab]")];
       const panelRoot = tabs.nextElementSibling;
       const panels = panelRoot ? [...panelRoot.querySelectorAll("[data-trend-panel]")] : [];
-      buttons.forEach((button) => {
-        button.addEventListener("click", () => {
-          buttons.forEach((item) => {
-            const active = item === button;
-            item.classList.toggle("active", active);
-            item.setAttribute("aria-selected", String(active));
-          });
-          panels.forEach((panel) => panel.classList.toggle("active", panel.id === button.getAttribute("aria-controls")));
+      const activateTab = (button) => {
+        buttons.forEach((item) => {
+          const active = item === button;
+          item.classList.toggle("active", active);
+          item.setAttribute("aria-selected", String(active));
         });
+        panels.forEach((panel) => panel.classList.toggle("active", panel.id === button.getAttribute("aria-controls")));
+      };
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => activateTab(button));
       });
+      const requestedKey = window.location.hash.slice(1);
+      const requestedButton = buttons.find((button) => button.dataset.trendKey === requestedKey);
+      if (requestedButton) activateTab(requestedButton);
     });`;
-
-function renderNav(active) {
-  const items = [
-    { href: "/", label: "跨区汇率与订阅", key: "nigeria" },
-    { href: "/#turkey-gift-cards", label: "土耳其礼品卡", key: "turkey" },
-  ];
-  return `<nav class="nav">${items.map((item) =>
-    `<a href="${item.href}"${item.key === active ? ' class="active" aria-current="page"' : ""}>${item.label}</a>`
-  ).join("")}</nav>`;
-}
 
 function renderNigeriaDashboard(history, turkeyHistory, env, rideShareConfig = null) {
   const records = normalizeNigeriaHistory(history, env);
+  const turkeyRecords = normalizeHistory(turkeyHistory, env);
+  const turkeyDenoms = parseDenoms(env.DENOMS);
   const items = nigeriaItems();
   const latest = records[records.length - 1] || null;
   const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
   const cards = `${renderCurrencyConversionCards(records)}${renderNigeriaCards(records, items)}`;
-  const trend = renderNigeriaTrendTabs(records, items);
+  const trend = renderDashboardTrendTabs(records, items, turkeyRecords, turkeyDenoms);
   const rideSharePlansConfig = rideShareConfig || parseRideSharePlans(env);
   const rideSharePlans = buildRideSharePlans(rideSharePlansConfig, latest);
-  const turkeySection = renderTurkeySection(turkeyHistory, env);
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -1134,7 +1108,7 @@ function renderNigeriaDashboard(history, turkeyHistory, env, rideShareConfig = n
       width: min(1120px, calc(100vw - 32px));
       margin: 0 auto;
       padding: 28px 0 40px;
-    }${NAV_STYLE}
+    }
     .meta {
       margin: 14px 2px 0;
       color: var(--muted);
@@ -1214,12 +1188,11 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     .top {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-end;
       gap: 12px;
       flex-wrap: wrap;
       margin-bottom: 22px;
     }
-    .top .nav { margin-bottom: 0; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .btn {
       display: inline-flex;
@@ -1255,17 +1228,9 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     }
     .panel-head h2 { margin: 0; font-size: 16px; font-weight: 760; }
     .phead-meta { margin: 0; color: var(--muted); font-size: 13px; }
-    .turkey-section { margin-top: 42px; scroll-margin-top: 16px; }
-    .turkey-section-head {
-      display: flex;
-      align-items: flex-end;
-      justify-content: space-between;
-      gap: 14px;
-      flex-wrap: wrap;
-      padding-top: 6px;
-    }
-    .turkey-section-head h2 { margin: 0; font-size: clamp(22px, 3vw, 28px); }
-    .turkey-section-head .meta { margin-top: 7px; }
+    .turkey-tab-content { padding-bottom: 16px; }
+    .turkey-cards { margin-top: 0; padding: 16px 16px 0; }
+    .turkey-history { margin: 16px 16px 0; }
     .rates { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .rate-item { padding: 16px 18px; border-right: 1px solid var(--line); }
     .rate-item:last-child { border-right: 0; }
@@ -1333,7 +1298,6 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
 <body>
   <main>
     <div class="top">
-      ${renderNav("nigeria")}
       <div class="actions">
         <button class="btn primary" type="button" data-scrape>手动抓取</button>
         <a class="btn" href="/api/nigeria">JSON</a>
@@ -1358,7 +1322,6 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     ${renderNigeriaRates(latest)}
     ${renderNigeriaHistory(records, items)}
     <p class="meta">汇率来源 <a href="https://www.google.com/finance" target="_blank" rel="noreferrer">Google Finance</a> · 订阅来源 <a href="https://appstoreprice.org/zh" target="_blank" rel="noreferrer">App Store Price</a> · 每日更新 · 最后更新：${escapeHtml(updatedAt)}</p>
-    ${turkeySection}
   </main>
   <script>${TREND_TABS_SCRIPT}
     const rideShareInitialPlans = ${scriptJson(rideSharePlansConfig)};
@@ -1980,11 +1943,7 @@ function toFiniteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function renderNigeriaTrendTabs(records, items) {
-  if (records.length === 0) {
-    return `<div class="empty">暂无数据，点击“手动抓取”生成第一条记录。</div>`;
-  }
-
+function renderDashboardTrendTabs(records, items, turkeyRecords, turkeyDenoms) {
   const tabDefinitions = [
     ...CURRENCY_CONVERSION_GROUPS.map((group) => ({ type: "conversion", ...group })),
     ...SUBSCRIPTION_TREND_GROUPS.map((group) => ({
@@ -1992,23 +1951,84 @@ function renderNigeriaTrendTabs(records, items) {
       ...group,
       items: group.itemKeys.map((key) => items.find((item) => item.key === key)).filter(Boolean),
     })),
+    { type: "turkey", ...TURKEY_TREND_GROUP },
   ];
   const tabs = tabDefinitions.map((item, index) => {
     const active = index === 0 ? " active" : "";
     const selected = index === 0 ? "true" : "false";
-    return `<button class="${active}" type="button" role="tab" aria-selected="${selected}" aria-controls="ng-trend-${index}" data-trend-tab style="color:${item.color}">${escapeHtml(item.label)}</button>`;
+    return `<button class="${active}" type="button" role="tab" aria-selected="${selected}" aria-controls="ng-trend-${index}" data-trend-tab data-trend-key="${escapeHtml(item.key)}" style="color:${item.color}">${escapeHtml(item.label)}</button>`;
   }).join("");
   const panels = tabDefinitions.map((item, index) => {
     const active = index === 0 ? " active" : "";
     return `<div id="ng-trend-${index}" class="trend-panel${active}" role="tabpanel" data-trend-panel>
-      ${item.type === "conversion"
-        ? renderCurrencyConversionTrendPanel(records, item, index)
-        : renderSubscriptionTrendPanel(records, item, index)}
+      ${renderDashboardTrendPanel(records, turkeyRecords, turkeyDenoms, item, index)}
     </div>`;
   }).join("");
 
   return `<div class="trend-tabs" role="tablist" aria-label="汇率与订阅项目" data-trend-tabs>${tabs}</div>
     <div class="trend-panels">${panels}</div>`;
+}
+
+function renderDashboardTrendPanel(records, turkeyRecords, turkeyDenoms, definition, index) {
+  if (definition.type === "conversion") {
+    return renderCurrencyConversionTrendPanel(records, definition, index);
+  }
+  if (definition.type === "subscription-group") {
+    return renderSubscriptionTrendPanel(records, definition, index);
+  }
+  return renderTurkeyTrendPanel(turkeyRecords, turkeyDenoms, index);
+}
+
+function renderTurkeyTrendPanel(records, denoms, index) {
+  const latest = latestRecord(records);
+  const definitions = denoms.map((denom, denomIndex) => ({
+    key: `turkey-${denom}`,
+    label: `${denom} TL`,
+    denom,
+    color: TURKEY_DENOM_COLORS[denomIndex % TURKEY_DENOM_COLORS.length],
+  }));
+  const summary = definitions.map((definition) => {
+    const series = turkeyDenomSeries(records, definition.denom);
+    if (series.length === 0) {
+      return `<span>${definition.denom} TL 最新 <strong>--</strong></span>`;
+    }
+    const latestPrice = series[series.length - 1].price;
+    const firstPrice = series[0].price;
+    return `<span>${definition.denom} TL 最新 <strong>¥${formatMoney(latestPrice)}</strong> · 较首条 <strong>${formatSignedMoney(round2(latestPrice - firstPrice))}</strong></span>`;
+  }).join("");
+  const legend = definitions.map((definition) =>
+    `<span class="trend-legend-item"><i class="trend-swatch" style="background:${definition.color}"></i>${definition.label}</span>`
+  ).join("");
+  const chartSeries = definitions.map((definition) => ({
+    key: definition.key,
+    label: definition.label,
+    color: definition.color,
+    points: turkeyDenomSeries(records, definition.denom),
+  }));
+
+  return `<div class="turkey-tab-content">
+    <section class="cards turkey-cards" aria-label="土耳其礼品卡最新价格">${renderLatestCards(latest, denoms)}</section>
+    <div class="trend-summary">${summary}</div>
+    <div class="trend-legend" aria-label="土耳其礼品卡图例">${legend}</div>
+    <div class="chart-wrap">${renderMultiSeriesTrendChart(chartSeries, {
+      id: `trend-turkey-${index}`,
+      ariaLabel: `土耳其 ${denoms.join("、")} TL 礼品卡人民币价格走势`,
+      emptyText: "暂无土耳其礼品卡数据。",
+    })}</div>
+    <section class="panel turkey-history">
+      <div class="panel-head"><h2>土耳其历史记录</h2><a class="btn" href="/api/history">JSON</a></div>
+      <div class="table-wrap">${renderHistoryTable(records, denoms)}</div>
+    </section>
+  </div>`;
+}
+
+function turkeyDenomSeries(records, denom) {
+  return records.map((record) => {
+    const price = record.prices?.find((item) => Number(item.denomTl) === Number(denom));
+    return Number.isFinite(Number(price?.priceCny))
+      ? { price: Number(price.priceCny), capturedAt: record.capturedAt }
+      : null;
+  }).filter(Boolean);
 }
 
 function renderSubscriptionTrendPanel(records, group, index) {
@@ -2333,33 +2353,6 @@ function renderTrendTooltip(point, color, width, pad, tooltipDate = formatDay, f
   </g>`;
 }
 
-function renderTurkeySection(history, env) {
-  const denoms = parseDenoms(env.DENOMS);
-  const records = normalizeHistory(history, env);
-  const latest = latestRecord(records);
-  const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
-
-  return `<section id="turkey-gift-cards" class="turkey-section" aria-labelledby="turkey-title">
-    <div class="turkey-section-head">
-      <div>
-        <h2 id="turkey-title">土耳其礼品卡</h2>
-        <p class="meta">最近 ${escapeHtml(String(retentionDays(env)))} 天数据 · 最后更新：${escapeHtml(updatedAt)}</p>
-      </div>
-      <a class="btn" href="/api/history">土耳其 JSON</a>
-    </div>
-    <section class="cards" aria-label="土耳其礼品卡最新价格">${renderLatestCards(latest, denoms)}</section>
-    <section class="panel">
-      <div class="panel-head"><h2>土耳其价格趋势</h2></div>
-      ${renderTrendTabs(records, denoms)}
-    </section>
-    <section class="panel">
-      <div class="panel-head"><h2>土耳其历史记录</h2><p class="phead-meta">${records.length} 次抓取</p></div>
-      <div class="table-wrap">${renderHistoryTable(records, denoms)}</div>
-    </section>
-    <p class="meta">礼品卡来源 <a href="${escapeHtml(env.SEAGM_URL || "https://www.seagm.com")}" target="_blank" rel="noreferrer">SEAGM</a> · 参考汇率来源 <a href="https://www.google.com/finance" target="_blank" rel="noreferrer">Google Finance</a></p>
-  </section>`;
-}
-
 function renderLatestCards(latest, denoms) {
   return denoms.map((denom) => {
     const price = latest?.prices?.find((item) => item.denomTl === denom);
@@ -2377,69 +2370,6 @@ function renderLatestCards(latest, denoms) {
       <div class="sub">原价 ¥${formatMoney(price.originalPriceCny)} · 折扣 ${formatMoney(price.discountPercent)}%<br>${googleLine}<br>SEAGM Credits ${price.credits}</div>
     </article>`;
   }).join("");
-}
-
-function renderTrendTabs(records, denoms) {
-  if (records.length === 0) {
-    return `<div class="empty">暂无数据，点击“抓取并保存”生成第一条记录。</div>`;
-  }
-
-  const colors = ["#1e7c63", "#2f68b8", "#c9513e", "#a86912"];
-  const tabs = denoms.map((denom, index) => {
-    const active = index === 0 ? " active" : "";
-    const selected = index === 0 ? "true" : "false";
-    const color = colors[index % colors.length];
-    return `<button class="${active}" type="button" role="tab" aria-selected="${selected}" aria-controls="trend-panel-${index}" data-trend-tab style="color:${color}">${denom} TL</button>`;
-  }).join("");
-  const panels = denoms.map((denom, index) => {
-    const color = colors[index % colors.length];
-    const active = index === 0 ? " active" : "";
-    return `<div id="trend-panel-${index}" class="trend-panel${active}" role="tabpanel" data-trend-panel>
-      ${renderTrendSummary(records, denom)}
-      <div class="chart-wrap">${renderChart(records, denom, color, index)}</div>
-    </div>`;
-  }).join("");
-
-  return `<div class="trend-tabs" role="tablist" aria-label="价格趋势面额" data-trend-tabs>${tabs}</div>
-    <div class="trend-panels">${panels}</div>`;
-}
-
-function renderTrendSummary(records, denom) {
-  const values = records
-    .map((record) => record.prices.find((item) => item.denomTl === denom)?.priceCny)
-    .filter((value) => Number.isFinite(value));
-
-  if (values.length === 0) {
-    return `<div class="trend-summary"><span>暂无 ${denom} TL 数据</span></div>`;
-  }
-
-  const latest = values[values.length - 1];
-  const first = values[0];
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const change = round2(latest - first);
-
-  return `<div class="trend-summary">
-    <span>最新 <strong>¥${formatMoney(latest)}</strong></span>
-    <span>区间 <strong>¥${formatMoney(min)} - ¥${formatMoney(max)}</strong></span>
-    <span>较首条 <strong>${formatSignedMoney(change)}</strong></span>
-  </div>`;
-}
-
-function renderChart(records, denom, color, index = 0) {
-  const points = records
-    .map((record) => {
-      const price = record.prices.find((item) => item.denomTl === denom);
-      return price && Number.isFinite(Number(price.priceCny))
-        ? { price: Number(price.priceCny), capturedAt: record.capturedAt }
-        : null;
-    })
-    .filter(Boolean);
-  return renderTrendChart(points, color, `trend-tk-${index}`, {
-    ariaLabel: `${denom} TL 价格趋势`,
-    emptyText: `暂无 ${denom} TL 数据。`,
-    tooltipDate: formatChartTime,
-  });
 }
 
 function renderHistoryTable(records, denoms) {
