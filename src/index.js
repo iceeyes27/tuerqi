@@ -14,11 +14,15 @@ const NIGERIA_APPSTORE_BASE = "https://appstoreprice.org/zh/apps/";
 function nigeriaItems() {
   return [
     { key: "youtube-solo", label: "YouTube Premium 单人", short: "YT 单人", url: `${NIGERIA_APPSTORE_BASE}544007664`, plan: "YouTube Premium", duration: "monthly", color: "#e0513b" },
-    { key: "youtube-family", label: "YouTube Premium 家庭", short: "YT 家庭", url: `${NIGERIA_APPSTORE_BASE}544007664`, plan: "YouTube Premium Family", duration: "monthly", color: "#c0392b" },
+    { key: "youtube-family", label: "YouTube Premium 家庭", short: "YT 家庭", url: `${NIGERIA_APPSTORE_BASE}544007664`, plan: "YouTube Premium Family", duration: "monthly", color: "#2f68b8" },
     { key: "spotify-solo", label: "Spotify 个人", short: "Spotify 个人", url: `${NIGERIA_APPSTORE_BASE}spotify`, plan: "Premium Individual", duration: "monthly", color: "#1db954" },
-    { key: "spotify-family", label: "Spotify 家庭", short: "Spotify 家庭", url: `${NIGERIA_APPSTORE_BASE}spotify`, plan: "Premium Family", duration: "monthly", color: "#157a3a" },
+    { key: "spotify-family", label: "Spotify 家庭", short: "Spotify 家庭", url: `${NIGERIA_APPSTORE_BASE}spotify`, plan: "Premium Family", duration: "monthly", color: "#7a4db3" },
   ];
 }
+const SUBSCRIPTION_TREND_GROUPS = [
+  { key: "youtube", label: "YouTube", itemKeys: ["youtube-solo", "youtube-family"], color: "#e0513b" },
+  { key: "spotify", label: "Spotify", itemKeys: ["spotify-solo", "spotify-family"], color: "#1db954" },
+];
 const CURRENCY_CONVERSIONS = [
   {
     key: "bolivia-bob-cny",
@@ -117,17 +121,17 @@ export default {
     try {
       if (url.pathname === "/") {
         return cachedResponse(request, ctx, async () => {
-          const history = await loadNigeriaHistory(env);
-          const rideShareConfig = await loadRideShareConfig(env);
-          return html(renderNigeriaDashboard(history, env, rideShareConfig), 200, READ_CACHE_CONTROL);
+          const [history, turkeyHistory, rideShareConfig] = await Promise.all([
+            loadNigeriaHistory(env),
+            loadHistory(env),
+            loadRideShareConfig(env),
+          ]);
+          return html(renderNigeriaDashboard(history, turkeyHistory, env, rideShareConfig), 200, READ_CACHE_CONTROL);
         });
       }
 
       if (url.pathname === "/turkey") {
-        return cachedResponse(request, ctx, async () => {
-          const history = await loadHistory(env);
-          return html(renderDashboard(history, env), 200, READ_CACHE_CONTROL);
-        });
+        return redirect("/#turkey-gift-cards");
       }
 
       if (url.pathname === "/api/nigeria") {
@@ -1011,7 +1015,7 @@ const CHART_STYLE = `
     .ng-point:hover .tooltip,
     .ng-point:focus .tooltip { display: block; }`;
 
-// Tabbed trend chart styling + behaviour shared by the Nigeria and Turkey pages.
+// Tabbed trend chart styling + behaviour shared by the dashboard sections.
 const TREND_TABS_STYLE = `
     .chart-wrap { padding: 16px 16px 8px; overflow-x: auto; }
     .trend-tabs {
@@ -1049,7 +1053,18 @@ const TREND_TABS_STYLE = `
       font-size: 13px;
       color: var(--muted);
     }
-    .trend-summary strong { color: var(--ink); }`;
+    .trend-summary strong { color: var(--ink); }
+    .trend-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding: 12px 16px 0;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .trend-legend-item { display: inline-flex; align-items: center; gap: 7px; }
+    .trend-swatch { width: 18px; height: 3px; border-radius: 999px; }`;
 
 const TREND_TABS_SCRIPT = `
     document.querySelectorAll("[data-trend-tabs]").forEach((tabs) => {
@@ -1071,14 +1086,14 @@ const TREND_TABS_SCRIPT = `
 function renderNav(active) {
   const items = [
     { href: "/", label: "跨区汇率与订阅", key: "nigeria" },
-    { href: "/turkey", label: "土耳其礼品卡", key: "turkey" },
+    { href: "/#turkey-gift-cards", label: "土耳其礼品卡", key: "turkey" },
   ];
   return `<nav class="nav">${items.map((item) =>
     `<a href="${item.href}"${item.key === active ? ' class="active" aria-current="page"' : ""}>${item.label}</a>`
   ).join("")}</nav>`;
 }
 
-function renderNigeriaDashboard(history, env, rideShareConfig = null) {
+function renderNigeriaDashboard(history, turkeyHistory, env, rideShareConfig = null) {
   const records = normalizeNigeriaHistory(history, env);
   const items = nigeriaItems();
   const latest = records[records.length - 1] || null;
@@ -1087,6 +1102,7 @@ function renderNigeriaDashboard(history, env, rideShareConfig = null) {
   const trend = renderNigeriaTrendTabs(records, items);
   const rideSharePlansConfig = rideShareConfig || parseRideSharePlans(env);
   const rideSharePlans = buildRideSharePlans(rideSharePlansConfig, latest);
+  const turkeySection = renderTurkeySection(turkeyHistory, env);
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -1181,6 +1197,12 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     }
     .card .value.down { color: var(--coral); }
     .card .value.up { color: var(--green); }
+    .card .price {
+      margin-top: 12px;
+      font-size: 30px;
+      line-height: 1;
+      font-weight: 800;
+    }
     .card .sub { margin-top: 12px; color: var(--muted); font-size: 13px; }
     .card .sub .up { color: var(--green); font-weight: 700; }
     .card .sub .down { color: var(--coral); font-weight: 700; }
@@ -1233,6 +1255,17 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     }
     .panel-head h2 { margin: 0; font-size: 16px; font-weight: 760; }
     .phead-meta { margin: 0; color: var(--muted); font-size: 13px; }
+    .turkey-section { margin-top: 42px; scroll-margin-top: 16px; }
+    .turkey-section-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding-top: 6px;
+    }
+    .turkey-section-head h2 { margin: 0; font-size: clamp(22px, 3vw, 28px); }
+    .turkey-section-head .meta { margin-top: 7px; }
     .rates { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .rate-item { padding: 16px 18px; border-right: 1px solid var(--line); }
     .rate-item:last-child { border-right: 0; }
@@ -1325,6 +1358,7 @@ ${CHART_STYLE}${TREND_TABS_STYLE}
     ${renderNigeriaRates(latest)}
     ${renderNigeriaHistory(records, items)}
     <p class="meta">汇率来源 <a href="https://www.google.com/finance" target="_blank" rel="noreferrer">Google Finance</a> · 订阅来源 <a href="https://appstoreprice.org/zh" target="_blank" rel="noreferrer">App Store Price</a> · 每日更新 · 最后更新：${escapeHtml(updatedAt)}</p>
+    ${turkeySection}
   </main>
   <script>${TREND_TABS_SCRIPT}
     const rideShareInitialPlans = ${scriptJson(rideSharePlansConfig)};
@@ -1953,7 +1987,11 @@ function renderNigeriaTrendTabs(records, items) {
 
   const tabDefinitions = [
     ...CURRENCY_CONVERSION_GROUPS.map((group) => ({ type: "conversion", ...group })),
-    ...items.map((item) => ({ type: "subscription", ...item })),
+    ...SUBSCRIPTION_TREND_GROUPS.map((group) => ({
+      type: "subscription-group",
+      ...group,
+      items: group.itemKeys.map((key) => items.find((item) => item.key === key)).filter(Boolean),
+    })),
   ];
   const tabs = tabDefinitions.map((item, index) => {
     const active = index === 0 ? " active" : "";
@@ -1965,12 +2003,31 @@ function renderNigeriaTrendTabs(records, items) {
     return `<div id="ng-trend-${index}" class="trend-panel${active}" role="tabpanel" data-trend-panel>
       ${item.type === "conversion"
         ? renderCurrencyConversionTrendPanel(records, item, index)
-        : `${renderNigeriaTrendSummary(records, item)}<div class="chart-wrap">${renderNigeriaItemChart(records, item, index)}</div>`}
+        : renderSubscriptionTrendPanel(records, item, index)}
     </div>`;
   }).join("");
 
   return `<div class="trend-tabs" role="tablist" aria-label="汇率与订阅项目" data-trend-tabs>${tabs}</div>
     <div class="trend-panels">${panels}</div>`;
+}
+
+function renderSubscriptionTrendPanel(records, group, index) {
+  const summary = group.items.map((item) => {
+    const series = nigeriaItemSeries(records, item.key);
+    if (series.length === 0) {
+      return `<span>${escapeHtml(item.short)} 最新 <strong>--</strong></span>`;
+    }
+    const latest = Number(series[series.length - 1].priceCny);
+    const first = Number(series[0].priceCny);
+    return `<span>${escapeHtml(item.short)} 最新 <strong>¥${formatMoney(latest)}</strong> · 较首条 <strong>${formatSignedMoney(round2(latest - first))}</strong></span>`;
+  }).join("");
+  const legend = group.items.map((item) =>
+    `<span class="trend-legend-item"><i class="trend-swatch" style="background:${item.color}"></i>${escapeHtml(item.label)}</span>`
+  ).join("");
+
+  return `<div class="trend-summary">${summary}</div>
+    <div class="trend-legend" aria-label="${escapeHtml(group.label)} 图例">${legend}</div>
+    <div class="chart-wrap">${renderSubscriptionGroupChart(records, group, index)}</div>`;
 }
 
 function renderCurrencyConversionTrendPanel(records, group, index) {
@@ -2023,37 +2080,23 @@ function renderCurrencyConversionChart(records, definition, gradientId) {
   });
 }
 
-function renderNigeriaTrendSummary(records, item) {
-  const series = nigeriaItemSeries(records, item.key);
-  if (series.length === 0) {
-    return `<div class="trend-summary"><span>暂无 ${escapeHtml(item.label)} 数据</span></div>`;
-  }
-
-  const values = series.map((price) => Number(price.priceCny));
-  const latest = values[values.length - 1];
-  const first = values[0];
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-
-  return `<div class="trend-summary">
-    <span>最新 <strong>¥${formatMoney(latest)}</strong></span>
-    <span>区间 <strong>¥${formatMoney(min)} - ¥${formatMoney(max)}</strong></span>
-    <span>较首条 <strong>${formatSignedMoney(round2(latest - first))}</strong></span>
-  </div>`;
-}
-
-function renderNigeriaItemChart(records, item, index) {
-  const points = records
-    .map((record) => {
+function renderSubscriptionGroupChart(records, group, index) {
+  const series = group.items.map((item) => ({
+    key: item.key,
+    label: item.short,
+    color: item.color,
+    points: records.map((record) => {
       const price = record.items?.[item.key];
       return Number.isFinite(Number(price?.priceCny))
         ? { price: Number(price.priceCny), capturedAt: record.capturedAt }
         : null;
-    })
-    .filter(Boolean);
-  return renderTrendChart(points, item.color, `trend-ng-${index}`, {
-    ariaLabel: `${item.label} 人民币价格走势`,
-    emptyText: `暂无 ${escapeHtml(item.label)} 数据。`,
+    }).filter(Boolean),
+  }));
+
+  return renderMultiSeriesTrendChart(series, {
+    id: `trend-ng-group-${index}`,
+    ariaLabel: `${group.label} 单人和家庭人民币价格走势`,
+    emptyText: `暂无 ${escapeHtml(group.label)} 数据。`,
   });
 }
 
@@ -2074,7 +2117,123 @@ function currencyConversionSeries(records, key) {
     .filter(Boolean);
 }
 
-// Shared area-style trend chart used by both the Nigeria and Turkey pages.
+function renderMultiSeriesTrendChart(series, options = {}) {
+  const formatValue = options.formatValue || ((value) => `¥${formatMoney(value)}`);
+  const prepared = series.map((item) => ({
+    ...item,
+    points: item.points.map((point) => ({
+      ...point,
+      timestamp: Date.parse(point.capturedAt),
+    })).filter((point) => Number.isFinite(point.timestamp) && Number.isFinite(point.price))
+      .sort((a, b) => a.timestamp - b.timestamp),
+  }));
+  const allPoints = prepared.flatMap((item) => item.points);
+  if (allPoints.length === 0) {
+    return `<div class="empty">${options.emptyText || "暂无数据。"}</div>`;
+  }
+
+  const width = 960;
+  const height = 320;
+  const pad = { top: 24, right: 24, bottom: 34, left: 64 };
+  const plotWidth = width - pad.left - pad.right;
+  const plotHeight = height - pad.top - pad.bottom;
+  const timestamps = [...new Set(allPoints.map((point) => point.timestamp))].sort((a, b) => a - b);
+  const firstTimestamp = timestamps[0];
+  const lastTimestamp = timestamps[timestamps.length - 1];
+  const x = (timestamp) => firstTimestamp === lastTimestamp
+    ? pad.left + plotWidth / 2
+    : pad.left + ((timestamp - firstTimestamp) / (lastTimestamp - firstTimestamp)) * plotWidth;
+
+  const values = allPoints.map((point) => point.price);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const valuePadding = Math.max((rawMax - rawMin) * 0.2, 0.05);
+  const min = rawMin - valuePadding;
+  const max = rawMax + valuePadding;
+  const y = (value) => pad.top + ((max - value) / Math.max(0.01, max - min)) * plotHeight;
+
+  const ticks = 4;
+  const grid = Array.from({ length: ticks + 1 }, (_, index) => max - (index / ticks) * (max - min)).map((label) => {
+    const gridY = y(label);
+    return `<line x1="${pad.left}" y1="${gridY}" x2="${width - pad.right}" y2="${gridY}" stroke="#8a948e" stroke-opacity="0.18" stroke-dasharray="4 6" />
+      <text x="${pad.left - 12}" y="${gridY + 4}" fill="#8a948e" font-size="12" text-anchor="end">${escapeHtml(formatValue(label))}</text>`;
+  }).join("");
+
+  const lines = prepared.map((item) => {
+    const plotted = item.points.map((point) => ({ ...point, cx: x(point.timestamp), cy: y(point.price) }));
+    if (plotted.length === 0) {
+      return "";
+    }
+    const points = plotted.map((point) => `${point.cx.toFixed(2)},${point.cy.toFixed(2)}`).join(" ");
+    const line = plotted.length > 1
+      ? `<polyline data-series="${escapeHtml(item.key)}" points="${points}" fill="none" stroke="${item.color}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" />`
+      : "";
+    const dots = plotted.map((point) =>
+      `<circle cx="${point.cx.toFixed(2)}" cy="${point.cy.toFixed(2)}" r="3.8" fill="#ffffff" stroke="${item.color}" stroke-width="2.4" />`
+    ).join("");
+    return `<g data-series="${escapeHtml(item.key)}" data-series-color="${item.color}">${line}${dots}</g>`;
+  }).join("");
+
+  const labelEvery = Math.max(1, Math.ceil(timestamps.length / 6));
+  const axis = timestamps.map((timestamp, index) => {
+    if (index !== 0 && index !== timestamps.length - 1 && index % labelEvery !== 0) {
+      return "";
+    }
+    return `<text x="${x(timestamp).toFixed(2)}" y="${height - 10}" fill="#8a948e" font-size="12" text-anchor="middle">${formatMonthDay(new Date(timestamp).toISOString())}</text>`;
+  }).join("");
+
+  const hover = timestamps.map((timestamp, index) => {
+    const entries = prepared.map((item) => {
+      const point = item.points.find((candidate) => candidate.timestamp === timestamp);
+      return point ? { ...item, point, cy: y(point.price) } : null;
+    }).filter(Boolean);
+    const centerX = x(timestamp);
+    const previousX = index > 0 ? x(timestamps[index - 1]) : pad.left;
+    const nextX = index < timestamps.length - 1 ? x(timestamps[index + 1]) : width - pad.right;
+    const hitLeft = index > 0 ? (previousX + centerX) / 2 : pad.left;
+    const hitRight = index < timestamps.length - 1 ? (centerX + nextX) / 2 : width - pad.right;
+    const accessibleValues = entries.map((entry) => `${entry.label} ${formatValue(entry.point.price)}`).join("，");
+    return `<g class="ng-point" tabindex="0" aria-label="${escapeHtml(`${formatChartTime(new Date(timestamp).toISOString())} ${accessibleValues}`)}">
+      <rect class="ng-hit" x="${hitLeft.toFixed(2)}" y="${pad.top}" width="${Math.max(1, hitRight - hitLeft).toFixed(2)}" height="${plotHeight}" />
+      ${renderMultiSeriesTooltip(timestamp, entries, centerX, width, pad, formatValue)}
+    </g>`;
+  }).join("");
+
+  return `<svg class="trend" data-combined-chart="${escapeHtml(options.id || "combined")}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(options.ariaLabel || "组合价格趋势图")}">
+    ${grid}
+    ${lines}
+    ${axis}
+    ${hover}
+  </svg>`;
+}
+
+function renderMultiSeriesTooltip(timestamp, entries, centerX, width, pad, formatValue) {
+  const tooltipWidth = 188;
+  const tooltipHeight = 30 + entries.length * 20;
+  const gap = 10;
+  const x = centerX > width - pad.right - tooltipWidth - gap
+    ? centerX - tooltipWidth - gap
+    : centerX + gap;
+  const y = pad.top + 8;
+  const markers = entries.map((entry) =>
+    `<circle cx="${centerX.toFixed(2)}" cy="${entry.cy.toFixed(2)}" r="4.3" fill="#ffffff" stroke="${entry.color}" stroke-width="2.4" />`
+  ).join("");
+  const rows = entries.map((entry, index) => {
+    const rowY = y + 42 + index * 20;
+    return `<circle cx="${(x + 13).toFixed(2)}" cy="${(rowY - 4).toFixed(2)}" r="3.5" fill="${entry.color}" />
+      <text x="${(x + 23).toFixed(2)}" y="${rowY.toFixed(2)}" fill="#1c2321" font-size="12" font-weight="700">${escapeHtml(`${entry.label} ${formatValue(entry.point.price)}`)}</text>`;
+  }).join("");
+
+  return `<g class="tooltip">
+    <line x1="${centerX.toFixed(2)}" y1="${pad.top}" x2="${centerX.toFixed(2)}" y2="${(pad.top + 262).toFixed(2)}" stroke="#66706b" stroke-width="1" stroke-dasharray="3 3" stroke-opacity="0.45" />
+    <rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${tooltipWidth}" height="${tooltipHeight}" rx="8" fill="#ffffff" stroke="#cbd3cc" stroke-width="1.3" />
+    ${markers}
+    <text x="${(x + 12).toFixed(2)}" y="${(y + 19).toFixed(2)}" fill="#66706b" font-size="12">${formatChartTime(new Date(timestamp).toISOString())}</text>
+    ${rows}
+  </g>`;
+}
+
+// Shared area-style trend chart used by the currency and Turkey sections.
 // `points` is an array of { price, capturedAt }; `gradientId` must be unique per
 // chart on the page so multiple charts don't share one gradient definition.
 function renderTrendChart(points, color, gradientId, options = {}) {
@@ -2174,208 +2333,31 @@ function renderTrendTooltip(point, color, width, pad, tooltipDate = formatDay, f
   </g>`;
 }
 
-function renderDashboard(history, env) {
+function renderTurkeySection(history, env) {
   const denoms = parseDenoms(env.DENOMS);
-  const records = compactDuplicateHistory(pruneHistory(history, retentionDays(env)));
+  const records = normalizeHistory(history, env);
   const latest = latestRecord(records);
-  const trendTabs = renderTrendTabs(records, denoms);
-  const latestCards = renderLatestCards(latest, denoms);
-  const table = renderHistoryTable(records, denoms);
   const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
 
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SEAGM 土区礼品卡价格</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f6f7f2;
-      --ink: #1c2321;
-      --muted: #66706b;
-      --line: #d9dfd7;
-      --panel: #ffffff;
-      --green: #1e7c63;
-      --blue: #2f68b8;
-      --coral: #c9513e;
-      --amber: #a86912;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--ink);
-      letter-spacing: 0;
-    }
-    main {
-      width: min(1120px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 28px 0 40px;
-    }
-    header {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      align-items: flex-start;
-      margin-bottom: 22px;
-    }${NAV_STYLE}
-    h1 {
-      margin: 0 0 8px;
-      font-size: clamp(28px, 4vw, 44px);
-      line-height: 1.05;
-      font-weight: 760;
-    }
-    .meta {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .actions {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-    a.button {
-      display: inline-flex;
-      align-items: center;
-      min-height: 38px;
-      padding: 0 14px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      color: var(--ink);
-      text-decoration: none;
-      font-size: 14px;
-      font-weight: 650;
-      white-space: nowrap;
-    }
-    a.primary {
-      background: var(--green);
-      border-color: var(--green);
-      color: white;
-    }
-    .cards {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 16px;
-      min-height: 128px;
-    }
-    .label {
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 700;
-    }
-    .price {
-      margin-top: 8px;
-      font-size: 32px;
-      line-height: 1;
-      font-weight: 790;
-    }
-    .sub {
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.4;
-    }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      margin-top: 14px;
-      overflow: hidden;
-    }
-    .panel-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--line);
-    }
-    h2 {
-      margin: 0;
-      font-size: 16px;
-    }
-${CHART_STYLE}${TREND_TABS_STYLE}
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 14px;
-    }
-    th, td {
-      padding: 11px 14px;
-      text-align: left;
-      border-bottom: 1px solid var(--line);
-      white-space: nowrap;
-    }
-    th {
-      color: var(--muted);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0;
-      background: #fbfcf9;
-    }
-    tr:last-child td { border-bottom: 0; }
-    .empty {
-      padding: 34px 16px;
-      color: var(--muted);
-      text-align: center;
-    }
-    @media (max-width: 760px) {
-      header { display: block; }
-      .actions { justify-content: flex-start; margin-top: 14px; }
-      .cards { grid-template-columns: 1fr; }
-      main { width: min(100vw - 24px, 1120px); padding-top: 20px; }
-      .table-wrap { overflow-x: auto; }
-    }
-  </style>
-</head>
-<body>
-  <main>
-    ${renderNav("turkey")}
-    <header>
+  return `<section id="turkey-gift-cards" class="turkey-section" aria-labelledby="turkey-title">
+    <div class="turkey-section-head">
       <div>
-        <h1>土区礼品卡价格</h1>
-        <p class="meta">最近 ${escapeHtml(String(retentionDays(env)))} 天数据，最后更新：${escapeHtml(updatedAt)}</p>
+        <h2 id="turkey-title">土耳其礼品卡</h2>
+        <p class="meta">最近 ${escapeHtml(String(retentionDays(env)))} 天数据 · 最后更新：${escapeHtml(updatedAt)}</p>
       </div>
-      <div class="actions">
-        <a class="button" href="/api/history">JSON</a>
-        <a class="button" href="/run?dry=1">试抓</a>
-      </div>
-    </header>
-
-    <section class="cards">${latestCards}</section>
-
+      <a class="btn" href="/api/history">土耳其 JSON</a>
+    </div>
+    <section class="cards" aria-label="土耳其礼品卡最新价格">${renderLatestCards(latest, denoms)}</section>
     <section class="panel">
-      <div class="panel-head">
-        <h2>价格趋势</h2>
-      </div>
-      ${trendTabs}
+      <div class="panel-head"><h2>土耳其价格趋势</h2></div>
+      ${renderTrendTabs(records, denoms)}
     </section>
-
     <section class="panel">
-      <div class="panel-head">
-        <h2>历史记录</h2>
-        <p class="meta">${records.length} 次抓取</p>
-      </div>
-      <div class="table-wrap">${table}</div>
+      <div class="panel-head"><h2>土耳其历史记录</h2><p class="phead-meta">${records.length} 次抓取</p></div>
+      <div class="table-wrap">${renderHistoryTable(records, denoms)}</div>
     </section>
-  </main>
-  <script>${TREND_TABS_SCRIPT}
-  </script>
-</body>
-</html>`;
+    <p class="meta">礼品卡来源 <a href="${escapeHtml(env.SEAGM_URL || "https://www.seagm.com")}" target="_blank" rel="noreferrer">SEAGM</a> · 参考汇率来源 <a href="https://www.google.com/finance" target="_blank" rel="noreferrer">Google Finance</a></p>
+  </section>`;
 }
 
 function renderLatestCards(latest, denoms) {
@@ -2694,6 +2676,14 @@ function json(body, status = 200, cacheControl = NO_STORE) {
     "cache-control": cacheControl,
   }));
   return new Response(JSON.stringify(body, null, 2), { status, headers });
+}
+
+function redirect(location, status = 302) {
+  const headers = withSecurityHeaders(new Headers({
+    location,
+    "cache-control": NO_STORE,
+  }));
+  return new Response(null, { status, headers });
 }
 
 function html(body, status = 200, cacheControl = NO_STORE) {

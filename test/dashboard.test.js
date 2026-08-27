@@ -11,7 +11,7 @@ globalThis.caches = {
 
 const worker = (await import("../src/index.js")).default;
 
-function testEnvironment() {
+function testEnvironment({ omitItems = [] } = {}) {
   const capturedAt = new Date().toISOString();
   const history = [{
     capturedAt,
@@ -58,11 +58,34 @@ function testEnvironment() {
       },
     },
   }];
+  omitItems.forEach((key) => delete history[0].items[key]);
+  const turkeyHistory = [{
+    capturedAt,
+    sourceUrl: "https://www.seagm.com/zh-cn/itunes-gift-card-turkey",
+    fx: {
+      ok: true,
+      source: "Google Finance",
+      rateCnyPerTry: 0.17,
+    },
+    prices: [{
+      denomTl: 500,
+      priceCny: 95,
+      originalPriceCny: 100,
+      discountPercent: 5,
+      credits: 5513,
+      available: true,
+      googlePriceCny: 85,
+      googlePremiumCny: 10,
+      googlePremiumPercent: 11.76,
+    }],
+  }];
 
   return {
     PRICE_HISTORY: {
       async get(key) {
-        return key === "appstore:ng-claude:v1" ? history : null;
+        if (key === "appstore:ng-claude:v1") return history;
+        if (key === "seagm:history:v1") return turkeyHistory;
+        return null;
       },
       async put() {},
     },
@@ -85,8 +108,47 @@ test("renders separate Bolivia and Philippines cards and omits seat detail table
   assert.match(body, /US\$146\.13/);
   assert.match(body, /¥982\.41/);
   assert.match(body, /编辑拼车/);
+  assert.match(body, /data-trend-tab[^>]*>YouTube<\/button>/);
+  assert.match(body, /data-trend-tab[^>]*>Spotify<\/button>/);
+  assert.equal((body.match(/aria-controls="ng-trend-/g) || []).length, 4);
+  assert.match(body, /data-combined-chart="trend-ng-group-2"/);
+  assert.match(body, /data-series="youtube-solo" data-series-color="#e0513b"/);
+  assert.match(body, /data-series="youtube-family" data-series-color="#2f68b8"/);
+  assert.match(body, /data-series="spotify-solo" data-series-color="#1db954"/);
+  assert.match(body, /data-series="spotify-family" data-series-color="#7a4db3"/);
+  assert.match(body, /id="turkey-gift-cards"/);
+  assert.match(body, /土耳其礼品卡/);
+  assert.match(body, /500 TL/);
+  assert.match(body, /¥95/);
+  assert.ok(body.indexOf('id="turkey-gift-cards"') > body.indexOf("汇率来源"));
   assert.doesNotMatch(body, /Claude Pro/);
   assert.doesNotMatch(body, /车位明细/);
+});
+
+test("keeps a combined subscription chart when one plan has no data", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/"),
+    testEnvironment({ omitItems: ["youtube-family"] }),
+    executionContext,
+  );
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(body, /data-combined-chart="trend-ng-group-2"/);
+  assert.match(body, /data-series="youtube-solo"/);
+  assert.doesNotMatch(body, /data-series="youtube-family"/);
+  assert.match(body, /YT 家庭 最新 <strong>--<\/strong>/);
+});
+
+test("redirects the retired Turkey page to the homepage section", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/turkey"),
+    testEnvironment(),
+    executionContext,
+  );
+
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get("location"), "/#turkey-gift-cards");
 });
 
 test("publishes conversion metadata while hiding legacy Claude data", async () => {
