@@ -2188,10 +2188,15 @@ function renderMultiSeriesTrendChart(series, options = {}) {
     const line = plotted.length > 1
       ? `<polyline data-series="${escapeHtml(item.key)}" points="${points}" fill="none" stroke="${item.color}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" />`
       : "";
-    const dots = plotted.map((point) =>
-      `<circle cx="${point.cx.toFixed(2)}" cy="${point.cy.toFixed(2)}" r="3.8" fill="#ffffff" stroke="${item.color}" stroke-width="2.4" />`
-    ).join("");
-    return `<g data-series="${escapeHtml(item.key)}" data-series-color="${item.color}">${line}${dots}</g>`;
+    const markers = plotted.map((point, pointIndex) => {
+      const isLatest = pointIndex === plotted.length - 1;
+      if (plotted.length > 2 && !isLatest) {
+        return "";
+      }
+
+      return `<circle data-series-marker="${isLatest ? "latest" : "short-series"}" cx="${point.cx.toFixed(2)}" cy="${point.cy.toFixed(2)}" r="4.2" fill="${item.color}" stroke="#ffffff" stroke-width="1.8" />`;
+    }).join("");
+    return `<g data-series="${escapeHtml(item.key)}" data-series-color="${item.color}">${line}${markers}</g>`;
   }).join("");
 
   const labelEvery = Math.max(1, Math.ceil(timestamps.length / 6));
@@ -2236,7 +2241,7 @@ function renderMultiSeriesTooltip(timestamp, entries, centerX, width, pad, forma
     : centerX + gap;
   const y = pad.top + 8;
   const markers = entries.map((entry) =>
-    `<circle cx="${centerX.toFixed(2)}" cy="${entry.cy.toFixed(2)}" r="4.3" fill="#ffffff" stroke="${entry.color}" stroke-width="2.4" />`
+    `<circle data-hover-marker="${escapeHtml(entry.key)}" cx="${centerX.toFixed(2)}" cy="${entry.cy.toFixed(2)}" r="4.5" fill="${entry.color}" stroke="#ffffff" stroke-width="1.8" />`
   ).join("");
   const rows = entries.map((entry, index) => {
     const rowY = y + 42 + index * 20;

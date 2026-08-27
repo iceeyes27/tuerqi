@@ -11,7 +11,7 @@ globalThis.caches = {
 
 const worker = (await import("../src/index.js")).default;
 
-function testEnvironment({ omitItems = [], omitTurkeyDenoms = [] } = {}) {
+function testEnvironment({ omitItems = [], omitTurkeyDenoms = [], historyPointCount = 2 } = {}) {
   const capturedAt = new Date().toISOString();
   const history = [{
     capturedAt,
@@ -68,6 +68,17 @@ function testEnvironment({ omitItems = [], omitTurkeyDenoms = [] } = {}) {
     conversion.convertedAmount = Math.max(0.01, conversion.convertedAmount - 0.5);
   });
   history.unshift(earlierDashboardRecord);
+  while (history.length < historyPointCount) {
+    const earlierRecord = structuredClone(history[0]);
+    earlierRecord.capturedAt = new Date(Date.parse(history[0].capturedAt) - 24 * 60 * 60 * 1000).toISOString();
+    Object.values(earlierRecord.items).forEach((price) => {
+      price.priceCny = Math.max(0.01, price.priceCny - 0.5);
+    });
+    Object.values(earlierRecord.conversions).forEach((conversion) => {
+      conversion.convertedAmount = Math.max(0.01, conversion.convertedAmount - 0.5);
+    });
+    history.unshift(earlierRecord);
+  }
   const turkeyHistory = [{
     capturedAt,
     sourceUrl: "https://www.seagm.com/zh-cn/itunes-gift-card-turkey",
@@ -94,6 +105,16 @@ function testEnvironment({ omitItems = [], omitTurkeyDenoms = [] } = {}) {
     price.googlePremiumCny -= 1;
   });
   turkeyHistory.unshift(earlierTurkeyRecord);
+  while (turkeyHistory.length < historyPointCount) {
+    const earlierRecord = structuredClone(turkeyHistory[0]);
+    earlierRecord.capturedAt = new Date(Date.parse(turkeyHistory[0].capturedAt) - 24 * 60 * 60 * 1000).toISOString();
+    earlierRecord.prices.forEach((price) => {
+      price.priceCny -= 1;
+      price.originalPriceCny -= 1;
+      price.googlePremiumCny -= 1;
+    });
+    turkeyHistory.unshift(earlierRecord);
+  }
 
   return {
     PRICE_HISTORY: {
@@ -193,6 +214,32 @@ test("keeps the Turkey combined chart when one denomination has no data", async 
   assert.doesNotMatch(body, /data-series="turkey-1000"/);
   assert.match(body, /data-series="turkey-2000"/);
   assert.match(body, /1000 TL 最新 <strong>--<\/strong>/);
+});
+
+test("keeps only the latest solid marker on dense combined charts", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/"),
+    testEnvironment({ historyPointCount: 5 }),
+    executionContext,
+  );
+  const body = await response.text();
+  const turkey500 = body.match(/<g data-series="turkey-500"[^>]*>(.*?)<\/g>/s)?.[1] || "";
+
+  assert.equal(response.status, 200);
+  assert.equal((turkey500.match(/data-series-marker=/g) || []).length, 1);
+  assert.match(turkey500, /data-series-marker="latest"[^>]*fill="#1e7c63"/);
+  assert.match(body, /data-hover-marker="turkey-500"[^>]*fill="#1e7c63"/);
+});
+
+test("shows both solid markers when a combined series has only two points", async () => {
+  const response = await worker.fetch(new Request("https://example.test/"), testEnvironment(), executionContext);
+  const body = await response.text();
+  const youtubeSolo = body.match(/<g data-series="youtube-solo"[^>]*>(.*?)<\/g>/s)?.[1] || "";
+
+  assert.equal(response.status, 200);
+  assert.equal((youtubeSolo.match(/data-series-marker=/g) || []).length, 2);
+  assert.match(youtubeSolo, /data-series-marker="short-series"[^>]*fill="#e0513b"/);
+  assert.match(youtubeSolo, /data-series-marker="latest"[^>]*fill="#e0513b"/);
 });
 
 test("publishes conversion metadata while hiding legacy Claude data", async () => {
