@@ -3,6 +3,7 @@ import {
   extractGoogleFinanceRate,
   googleFinanceQuoteUrls,
 } from "./google-finance.js";
+import { renderDashboardPage } from "./ui/dashboard-page.js";
 
 const HISTORY_KEY = "seagm:history:v1";
 const NIGERIA_HISTORY_KEY = "appstore:ng-claude:v1";
@@ -182,7 +183,7 @@ export default {
 
           const records = normalizeNigeriaHistory(await loadNigeriaHistory(env), env);
           const latest = latestRecord(records);
-          const plans = buildRideSharePlans(plansConfig, latest);
+          const plans = buildRideSharePlans(plansConfig, latestNigeriaItemSnapshot(records, nigeriaItems()));
           return json({
             ok: true,
             latestFx: latest?.fx || null,
@@ -196,7 +197,7 @@ export default {
           const records = normalizeNigeriaHistory(await loadNigeriaHistory(env), env);
           const latest = latestRecord(records);
           const plansConfig = await loadRideShareConfig(env);
-          const plans = buildRideSharePlans(plansConfig, latest);
+          const plans = buildRideSharePlans(plansConfig, latestNigeriaItemSnapshot(records, nigeriaItems()));
           return json({
             ok: true,
             latestFx: latest?.fx || null,
@@ -984,87 +985,198 @@ function stableStringify(value) {
   return JSON.stringify(value);
 }
 
-const CHART_STYLE = `
-    svg.trend { display: block; width: 100%; min-width: 640px; height: auto; }
-    .ng-point { outline: none; }
-    .ng-hit { fill: transparent; pointer-events: all; }
-    .ng-point .tooltip { display: none; pointer-events: none; }
-    .ng-point:hover .tooltip,
-    .ng-point:focus .tooltip { display: block; }`;
+function latestNigeriaItemEntry(records, key) {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const price = records[index]?.items?.[key];
+    if (Number.isFinite(Number(price?.priceCny))) {
+      return { ...price, capturedAt: records[index].capturedAt };
+    }
+  }
+  return null;
+}
 
-// Tabbed trend chart styling + behaviour shared by the dashboard sections.
-const TREND_TABS_STYLE = `
-    .chart-wrap { padding: 16px 16px 8px; overflow-x: auto; }
-    .trend-tabs {
-      display: flex;
-      flex-wrap: nowrap;
-      gap: 8px;
-      padding: 14px 16px 10px;
-      overflow-x: auto;
-    }
-    .trend-tabs button {
-      display: inline-flex;
-      align-items: center;
-      min-height: 32px;
-      padding: 0 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      color: var(--muted);
-      background: #fbfcf9;
-      font: inherit;
-      font-size: 13px;
-      font-weight: 750;
-      cursor: pointer;
-      flex: none;
-    }
-    .trend-tabs button.active {
-      border-color: currentColor;
-      background: var(--panel);
-    }
-    .trend-panels { border-top: 1px solid var(--line); }
-    .trend-panel { display: none; }
-    .trend-panel.active { display: block; }
-    .trend-summary {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 14px;
-      padding: 12px 16px 0;
-      font-size: 13px;
-      color: var(--muted);
-    }
-    .trend-summary strong { color: var(--ink); }
-    .trend-legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 14px;
-      padding: 12px 16px 0;
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 700;
-    }
-    .trend-legend-item { display: inline-flex; align-items: center; gap: 7px; }
-    .trend-swatch { width: 18px; height: 3px; border-radius: 999px; }`;
+function latestNigeriaItemSnapshot(records, items) {
+  return {
+    items: Object.fromEntries(items.map((item) => [item.key, latestNigeriaItemEntry(records, item.key)])),
+  };
+}
 
-const TREND_TABS_SCRIPT = `
-    document.querySelectorAll("[data-trend-tabs]").forEach((tabs) => {
-      const buttons = [...tabs.querySelectorAll("[data-trend-tab]")];
-      const panelRoot = tabs.nextElementSibling;
-      const panels = panelRoot ? [...panelRoot.querySelectorAll("[data-trend-panel]")] : [];
-      const activateTab = (button) => {
-        buttons.forEach((item) => {
-          const active = item === button;
-          item.classList.toggle("active", active);
-          item.setAttribute("aria-selected", String(active));
-        });
-        panels.forEach((panel) => panel.classList.toggle("active", panel.id === button.getAttribute("aria-controls")));
+function seriesChangePercent(series, valueKey = "priceCny") {
+  if (series.length < 2) {
+    return 0;
+  }
+  const first = Number(series[0]?.[valueKey]);
+  const latest = Number(series[series.length - 1]?.[valueKey]);
+  return first > 0 && Number.isFinite(latest) ? round2((latest / first - 1) * 100) : 0;
+}
+
+function dashboardChangeMeta(percent) {
+  if (percent > 0) {
+    return { text: `↗ ${formatSignedPercent(percent)}`, tone: "positive" };
+  }
+  if (percent < 0) {
+    return { text: `↘ ${formatSignedPercent(percent)}`, tone: "negative" };
+  }
+  return { text: "→ 0%", tone: "neutral" };
+}
+
+function dashboardRenewStatus(plan) {
+  if (!plan.renewOn) {
+    return { label: "未填写到期日", tone: "muted" };
+  }
+  if (plan.daysUntilRenew == null) {
+    return { label: formatDay(plan.renewOn), tone: "muted" };
+  }
+  if (plan.daysUntilRenew < 0) {
+    return { label: `已过期 ${Math.abs(plan.daysUntilRenew)} 天`, tone: "danger" };
+  }
+  return { label: `${plan.daysUntilRenew} 天后到期`, tone: "positive" };
+}
+
+function buildDashboardOverview(records, items, rideSharePlans) {
+  const boliviaDefinition = CURRENCY_CONVERSIONS.find((item) => item.key === "bolivia-bob-cny");
+  const boliviaSeries = currencyConversionSeries(records, boliviaDefinition.key);
+  const boliviaLatest = boliviaSeries[boliviaSeries.length - 1] || null;
+  const boliviaFirst = boliviaSeries[0] || null;
+  const boliviaPercent = seriesChangePercent(boliviaSeries, "convertedAmount");
+  const boliviaChange = dashboardChangeMeta(boliviaPercent);
+
+  const latestSubscriptions = items
+    .map((item) => ({ item, price: latestNigeriaItemEntry(records, item.key) }))
+    .filter((entry) => entry.price);
+  const cheapest = [...latestSubscriptions].sort((a, b) => Number(a.price.priceCny) - Number(b.price.priceCny))[0] || null;
+  const rideSummary = summarizeRideSharePlans(rideSharePlans);
+
+  const latestDashboardTime = records.length ? Date.parse(records[records.length - 1].capturedAt) : NaN;
+  const latestSubscriptionTime = Math.max(...latestSubscriptions.map((entry) => Date.parse(entry.price.capturedAt)).filter(Number.isFinite));
+  const staleDays = Number.isFinite(latestDashboardTime) && Number.isFinite(latestSubscriptionTime)
+    ? Math.floor((latestDashboardTime - latestSubscriptionTime) / (24 * 60 * 60 * 1000))
+    : null;
+  const notice = staleDays != null && staleDays > 2
+    ? { title: "订阅源数据较旧", detail: `当前展示最近一次有效价格，距汇率最新记录约 ${staleDays} 天。` }
+    : null;
+
+  const watchConversion = (label, usdDefinition, cnyDefinition) => {
+    const usd = latestCurrencyConversion(records, usdDefinition.key);
+    const cny = latestCurrencyConversion(records, cnyDefinition.key);
+    return {
+      label,
+      value: cny ? formatCurrencyAmount(cny.convertedAmount, "CNY") : "--",
+      meta: usd ? formatCurrencyAmount(usd.convertedAmount, "USD") : "USD --",
+      change: "今日更新",
+      tone: "neutral",
+    };
+  };
+
+  const watchSubscription = (key, label) => {
+    const item = items.find((entry) => entry.key === key);
+    const price = latestNigeriaItemEntry(records, key);
+    const series = nigeriaItemSeries(records, key);
+    const change = dashboardChangeMeta(seriesChangePercent(series));
+    return {
+      label,
+      value: price ? formatCny(price.priceCny) : "--",
+      meta: price?.priceNgn ? `${formatInteger(price.priceNgn)} NGN` : "暂无有效价格",
+      change: item && price ? change.text : "",
+      tone: change.tone,
+    };
+  };
+
+  const philippinesUsd = CURRENCY_CONVERSIONS.find((item) => item.key === "philippines-php-usd");
+  const philippinesCny = CURRENCY_CONVERSIONS.find((item) => item.key === "philippines-php-cny");
+
+  return {
+    notice,
+    stats: [
+      {
+        label: "玻利维亚 · 139.9 BOB",
+        value: boliviaLatest ? formatCurrencyAmount(boliviaLatest.convertedAmount, "CNY") : "--",
+        meta: boliviaChange.text,
+        tone: boliviaChange.tone,
+      },
+      {
+        label: "最低订阅月费",
+        value: cheapest ? formatCny(cheapest.price.priceCny) : "--",
+        meta: cheapest ? cheapest.item.short : "暂无数据",
+        tone: "neutral",
+      },
+      {
+        label: "可外拼车位",
+        value: String(rideSummary.totalAvailableSeats),
+        meta: rideSummary.totalAvailableSeats > 0 ? "有空位" : "已满",
+        tone: rideSummary.totalAvailableSeats > 0 ? "positive" : "neutral",
+      },
+    ],
+    chart: {
+      title: boliviaDefinition.label,
+      caption: `最近 ${boliviaSeries.length} 次记录`,
+      value: boliviaLatest ? formatCurrencyAmount(boliviaLatest.convertedAmount, "CNY") : "--",
+      change: boliviaLatest && boliviaFirst ? formatSignedMoney(round2(boliviaLatest.convertedAmount - boliviaFirst.convertedAmount)) : "--",
+      tone: boliviaLatest && boliviaFirst && boliviaLatest.convertedAmount < boliviaFirst.convertedAmount ? "positive" : "neutral",
+      html: renderCurrencyConversionChart(records, boliviaDefinition, "overview-bolivia"),
+    },
+    watch: [
+      watchConversion("菲律宾 9010 PHP", philippinesUsd, philippinesCny),
+      watchSubscription("youtube-family", "YouTube 家庭"),
+      watchSubscription("spotify-family", "Spotify 家庭"),
+    ],
+    ridesLabel: `${rideSummary.totalOccupiedSeats} / ${rideSummary.totalSellableSeats} 已上车`,
+    ridePlans: rideSharePlans.map((plan) => {
+      const renew = dashboardRenewStatus(plan);
+      return {
+        name: plan.name,
+        sellableSeats: plan.sellableSeats,
+        occupiedSeats: plan.occupiedExternalSeats,
+        seatLabel: `${plan.availableSeats} 个空位`,
+        renewLabel: renew.label,
+        renewTone: renew.tone,
+        priceLabel: plan.priceCny != null ? `最近有效价 ${formatCny(plan.priceCny)}` : "暂无有效价格",
+        outstandingLabel: `待收 ${formatMaybeCny(plan.outstandingCny)}`,
       };
-      buttons.forEach((button) => {
-        button.addEventListener("click", () => activateTab(button));
-      });
-      const requestedKey = window.location.hash.slice(1);
-      const requestedButton = buttons.find((button) => button.dataset.trendKey === requestedKey);
-      if (requestedButton) activateTab(requestedButton);
-    });`;
+    }),
+  };
+}
+
+function buildDashboardSourceHealth(records, items, turkeyRecords) {
+  const timestamps = [
+    ...records.map((record) => Date.parse(record.capturedAt)),
+    ...turkeyRecords.map((record) => Date.parse(record.capturedAt)),
+  ].filter(Number.isFinite);
+  const referenceTime = timestamps.length ? Math.max(...timestamps) : Date.now();
+  const health = (label, timestamp, detail) => {
+    if (!Number.isFinite(timestamp)) {
+      return { label, status: "无数据", tone: "negative", detail };
+    }
+    const ageDays = Math.max(0, Math.floor((referenceTime - timestamp) / (24 * 60 * 60 * 1000)));
+    return {
+      label,
+      status: ageDays > 2 ? "数据较旧" : "正常",
+      tone: ageDays > 2 ? "warning" : "positive",
+      detail: `${detail} · ${formatDateTime(new Date(timestamp).toISOString())}`,
+    };
+  };
+
+  const latestConversionTime = Math.max(...records
+    .filter((record) => Object.keys(record.conversions || {}).length > 0)
+    .map((record) => Date.parse(record.capturedAt))
+    .filter(Number.isFinite));
+  const latestSubscriptionTime = Math.max(...items
+    .map((item) => Date.parse(latestNigeriaItemEntry(records, item.key)?.capturedAt || ""))
+    .filter(Number.isFinite));
+  const latestTurkeyTime = Math.max(...turkeyRecords.map((record) => Date.parse(record.capturedAt)).filter(Number.isFinite));
+
+  return [
+    health("Google Finance", latestConversionTime, "玻利维亚与菲律宾汇率"),
+    health("App Store Price", latestSubscriptionTime, "YouTube 与 Spotify"),
+    health("SEAGM", latestTurkeyTime, "土耳其礼品卡"),
+    {
+      label: "Cloudflare KV",
+      status: records.length || turkeyRecords.length ? "正常" : "无数据",
+      tone: records.length || turkeyRecords.length ? "positive" : "negative",
+      detail: `${records.length + turkeyRecords.length} 条历史记录`,
+    },
+  ];
+}
 
 function renderNigeriaDashboard(history, turkeyHistory, env, rideShareConfig = null) {
   const records = normalizeNigeriaHistory(history, env);
@@ -1073,391 +1185,21 @@ function renderNigeriaDashboard(history, turkeyHistory, env, rideShareConfig = n
   const items = nigeriaItems();
   const latest = records[records.length - 1] || null;
   const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
-  const cards = `${renderCurrencyConversionCards(records)}${renderNigeriaCards(records, items)}`;
-  const trend = renderDashboardTrendTabs(records, items, turkeyRecords, turkeyDenoms);
   const rideSharePlansConfig = rideShareConfig || parseRideSharePlans(env);
-  const rideSharePlans = buildRideSharePlans(rideSharePlansConfig, latest);
+  const rideSharePlans = buildRideSharePlans(rideSharePlansConfig, latestNigeriaItemSnapshot(records, items));
 
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>跨区汇率与订阅价格走势</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f6f7f2;
-      --ink: #1c2321;
-      --muted: #66706b;
-      --line: #e2e7e0;
-      --panel: #ffffff;
-      --green: #1e7c63;
-      --green-soft: #e9f7ef;
-      --green-line: #2bb673;
-      --coral: #d34a3a;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--ink);
-    }
-    main {
-      width: min(1120px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 28px 0 40px;
-    }
-    .meta {
-      margin: 14px 2px 0;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .chart-card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      overflow: hidden;
-      box-shadow: 0 1px 2px rgba(28, 35, 33, 0.04);
-    }
-    .chart-card-head {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      padding: 20px 24px;
-      background: var(--green-soft);
-    }
-    .chart-icon {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 44px;
-      height: 44px;
-      border-radius: 50%;
-      background: #d6efe0;
-      color: var(--green-line);
-      flex: none;
-    }
-    .chart-card-head h1 {
-      margin: 0;
-      font-size: clamp(20px, 2.6vw, 26px);
-      font-weight: 780;
-    }
-${CHART_STYLE}${TREND_TABS_STYLE}
-    .cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 14px;
-      margin-top: 16px;
-    }
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 18px 18px 16px;
-    }
-    .card .label { color: var(--muted); font-size: 14px; font-weight: 650; }
-    .card .value {
-      margin-top: 12px;
-      font-size: 30px;
-      line-height: 1;
-      font-weight: 800;
-    }
-    .card .value .hl {
-      background: #d6f3e1;
-      border-radius: 7px;
-      padding: 2px 8px;
-    }
-    .card .value.down { color: var(--coral); }
-    .card .value.up { color: var(--green); }
-    .card .price {
-      margin-top: 12px;
-      font-size: 30px;
-      line-height: 1;
-      font-weight: 800;
-    }
-    .card .sub { margin-top: 12px; color: var(--muted); font-size: 13px; }
-    .card .sub .up { color: var(--green); font-weight: 700; }
-    .card .sub .down { color: var(--coral); font-weight: 700; }
-    .card .value.dual { display: grid; gap: 8px; font-size: 24px; line-height: 1.15; }
-    .conversion-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .conversion-chart-grid > section + section { border-left: 1px solid var(--line); }
-    .conversion-chart-title { margin: 0; padding: 14px 16px 0; font-size: 13px; color: var(--muted); }
-    .empty { padding: 60px 16px; text-align: center; color: var(--muted); }
-    .top {
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin-bottom: 22px;
-    }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      min-height: 38px;
-      padding: 0 16px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--panel);
-      color: var(--ink);
-      text-decoration: none;
-      font: inherit;
-      font-size: 14px;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    .btn.primary { background: var(--green); border-color: var(--green); color: #ffffff; }
-    .btn:disabled { opacity: 0.6; cursor: default; }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      margin-top: 16px;
-      overflow: hidden;
-    }
-    .panel-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 14px 18px;
-      border-bottom: 1px solid var(--line);
-    }
-    .panel-head h2 { margin: 0; font-size: 16px; font-weight: 760; }
-    .phead-meta { margin: 0; color: var(--muted); font-size: 13px; }
-    .turkey-tab-content { padding-bottom: 16px; }
-    .turkey-cards { margin-top: 0; padding: 16px 16px 0; }
-    .turkey-history { margin: 16px 16px 0; }
-    .rates { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .rate-item { padding: 16px 18px; border-right: 1px solid var(--line); }
-    .rate-item:last-child { border-right: 0; }
-    .rate-item .label { color: var(--muted); font-size: 13px; font-weight: 650; }
-    .rate-item .value { margin-top: 8px; font-size: 22px; font-weight: 780; }
-    .ride-cards {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      padding: 16px;
-      border-top: 1px solid var(--line);
-    }
-    .ride-card {
-      background: #fbfcf9;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 16px;
-    }
-    .ride-card h3 { margin: 0; font-size: 18px; }
-    .ride-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px 14px;
-      margin-top: 14px;
-    }
-    .ride-metric { min-width: 0; }
-    .ride-metric .label,
-    .ride-card .label { display: block; color: var(--muted); font-size: 13px; font-weight: 700; }
-    .ride-metric .value { margin-top: 4px; font-size: 18px; font-weight: 760; line-height: 1.2; }
-    .ride-note, .legend { color: var(--muted); font-size: 13px; line-height: 1.5; }
-    .ride-note { margin-top: 12px; }
-    .legend { padding: 0 16px 14px; }
-    .edit-actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 16px 14px; }
-    .edit-form { display: none; padding: 0 16px 16px; }
-    .edit-form.active { display: block; }
-    .edit-plan { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-top: 12px; }
-    .edit-plan-head { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; padding: 12px; background: #fbfcf9; border-bottom: 1px solid var(--line); }
-    .edit-field { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
-    .edit-field input,
-    .edit-field select { min-height: 34px; min-width: 120px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font: inherit; background: #fff; color: var(--ink); }
-    .edit-field input[type="number"] { width: 92px; min-width: 92px; }
-    .edit-table { overflow-x: auto; }
-    .edit-table input,
-    .edit-table select { min-height: 32px; border: 1px solid var(--line); border-radius: 7px; padding: 0 8px; font: inherit; background: #fff; color: var(--ink); }
-    .edit-table input[type="number"] { width: 84px; }
-    .edit-status { padding: 0 16px 14px; color: var(--muted); font-size: 13px; }
-    .edit-status.error { color: var(--coral); }
-    table { width: 100%; border-collapse: collapse; font-size: 14px; }
-    th, td { padding: 11px 16px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
-    th { color: var(--muted); font-size: 12px; background: #fbfcf9; font-weight: 700; }
-    tbody tr:last-child td { border-bottom: 0; }
-    .table-wrap { overflow-x: auto; }
-    @media (max-width: 760px) {
-      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .ride-cards,
-      .ride-grid,
-      .conversion-chart-grid { grid-template-columns: 1fr; }
-      .conversion-chart-grid > section + section { border-left: 0; border-top: 1px solid var(--line); }
-      .rates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .rate-item:nth-child(2) { border-right: 0; }
-      main { width: min(100vw - 24px, 1120px); padding-top: 20px; }
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <div class="top">
-      <div class="actions">
-        <button class="btn primary" type="button" data-scrape>手动抓取</button>
-        <a class="btn" href="/api/nigeria">JSON</a>
-      </div>
-    </div>
-    <section class="chart-card">
-      <div class="chart-card-head">
-        <span class="chart-icon" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18 L9 12 L13 15 L20 6"/><path d="M3 21 H21"/></svg>
-        </span>
-        <h1>跨区汇率与订阅价格走势</h1>
-      </div>
-      ${trend}
-    </section>
-
-    <section class="cards">${cards}</section>
-    <section class="cards">${renderRideShareOverview(rideSharePlans)}</section>
-    <section class="panel">
-      <div class="panel-head"><h2>拼车</h2><p class="phead-meta">用于对账、成本核算和车位状态跟踪</p></div>
-      ${renderRideShareSection(rideSharePlans, rideSharePlansConfig)}
-    </section>
-    ${renderNigeriaRates(latest)}
-    ${renderNigeriaHistory(records, items)}
-    <p class="meta">汇率来源 <a href="https://www.google.com/finance" target="_blank" rel="noreferrer">Google Finance</a> · 订阅来源 <a href="https://appstoreprice.org/zh" target="_blank" rel="noreferrer">App Store Price</a> · 每日更新 · 最后更新：${escapeHtml(updatedAt)}</p>
-  </main>
-  <script>${TREND_TABS_SCRIPT}
-    const rideShareInitialPlans = ${scriptJson(rideSharePlansConfig)};
-    const rideShareForm = document.querySelector("[data-rideshare-form]");
-    const rideShareStatus = document.querySelector("[data-rideshare-status]");
-    const rideShareEditBtn = document.querySelector("[data-rideshare-edit]");
-    const rideShareSaveBtn = document.querySelector("[data-rideshare-save]");
-    const rideShareCancelBtn = document.querySelector("[data-rideshare-cancel]");
-    const setRideShareStatus = (message, isError = false) => {
-      if (!rideShareStatus) return;
-      rideShareStatus.textContent = message || "";
-      rideShareStatus.classList.toggle("error", Boolean(isError));
-    };
-    const resetRideShareForm = () => {
-      rideShareInitialPlans.forEach((plan, planIndex) => {
-        const root = document.querySelector('[data-plan-index="' + planIndex + '"]');
-        root?.querySelectorAll("[data-plan-field]").forEach((input) => {
-          input.value = (plan[input.dataset.planField] ?? "").toString();
-        });
-        plan.seats.forEach((seat, seatIndex) => {
-          const row = root?.querySelector('[data-seat-index="' + seatIndex + '"]');
-          row?.querySelectorAll("[data-seat-field]").forEach((input) => {
-            const field = input.dataset.seatField;
-            const value = field === "chargeCny" || field === "paidAmountCny"
-              ? formatInputNumber(seat[field])
-              : (seat[field] ?? "").toString();
-            input.value = value;
-          });
-        });
-      });
-    };
-    rideShareEditBtn?.addEventListener("click", () => {
-      rideShareForm?.classList.add("active");
-      rideShareEditBtn.disabled = true;
-      setRideShareStatus("修改后点击保存。首次保存需要输入 RUN_TOKEN。");
-    });
-    rideShareCancelBtn?.addEventListener("click", () => {
-      resetRideShareForm();
-      rideShareForm?.classList.remove("active");
-      if (rideShareEditBtn) rideShareEditBtn.disabled = false;
-      setRideShareStatus("");
-    });
-    const readMoneyInput = (input) => {
-      const value = input?.value?.trim();
-      if (!value) return null;
-      const number = Number(value);
-      return Number.isFinite(number) ? number : null;
-    };
-    const collectRideSharePlans = () => rideShareInitialPlans.map((plan, planIndex) => {
-      const root = document.querySelector('[data-plan-index="' + planIndex + '"]');
-      const nextPlan = { ...plan };
-      root?.querySelectorAll("[data-plan-field]").forEach((input) => {
-        nextPlan[input.dataset.planField] = input.value.trim();
-      });
-      nextPlan.seats = plan.seats.map((seat, seatIndex) => {
-        const row = root?.querySelector('[data-seat-index="' + seatIndex + '"]');
-        const nextSeat = { ...seat };
-        row?.querySelectorAll("[data-seat-field]").forEach((input) => {
-          const field = input.dataset.seatField;
-          nextSeat[field] = field === "chargeCny" || field === "paidAmountCny" ? readMoneyInput(input) : input.value.trim();
-        });
-        return nextSeat;
-      });
-      return nextPlan;
-    });
-    rideShareSaveBtn?.addEventListener("click", async () => {
-      let token = localStorage.getItem("ng_run_token") || "";
-      if (!token) {
-        token = (window.prompt("请输入 RUN_TOKEN（用于保存拼车信息）") || "").trim();
-        if (!token) return;
-        localStorage.setItem("ng_run_token", token);
-      }
-      const original = rideShareSaveBtn.textContent;
-      rideShareSaveBtn.disabled = true;
-      rideShareSaveBtn.textContent = "保存中…";
-      setRideShareStatus("保存中…");
-      try {
-        const res = await fetch("/api/rideshare?token=" + encodeURIComponent(token), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ plans: collectRideSharePlans() }),
-        });
-        if (res.status === 403) {
-          localStorage.removeItem("ng_run_token");
-          setRideShareStatus("RUN_TOKEN 无效，请重新保存并输入。", true);
-          return;
-        }
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) {
-          setRideShareStatus("保存失败：" + (data.error || ("HTTP " + res.status)), true);
-          return;
-        }
-        setRideShareStatus("保存成功，正在刷新…");
-        window.location.reload();
-      } catch (error) {
-        setRideShareStatus("请求出错：" + error.message, true);
-      } finally {
-        rideShareSaveBtn.disabled = false;
-        rideShareSaveBtn.textContent = original;
-      }
-    });
-    const scrapeBtn = document.querySelector("[data-scrape]");
-    scrapeBtn?.addEventListener("click", async () => {
-      let token = localStorage.getItem("ng_run_token") || "";
-      if (!token) {
-        token = (window.prompt("请输入 RUN_TOKEN（用于授权写入数据）") || "").trim();
-        if (!token) return;
-        localStorage.setItem("ng_run_token", token);
-      }
-      const original = scrapeBtn.textContent;
-      scrapeBtn.disabled = true;
-      scrapeBtn.textContent = "抓取中…";
-      try {
-        const res = await fetch("/run?token=" + encodeURIComponent(token), { method: "GET" });
-        if (res.status === 403) {
-          localStorage.removeItem("ng_run_token");
-          window.alert("RUN_TOKEN 无效，请重新输入");
-          return;
-        }
-        const data = await res.json().catch(() => ({}));
-        if (data && data.nigeria && data.nigeria.ok) {
-          window.location.reload();
-          return;
-        }
-        const reason = (data && data.errors && JSON.stringify(data.errors)) || (data && data.error) || ("HTTP " + res.status);
-        window.alert("抓取失败：" + reason);
-      } catch (error) {
-        window.alert("请求出错：" + error.message);
-      } finally {
-        scrapeBtn.disabled = false;
-        scrapeBtn.textContent = original;
-      }
-    });
-  </script>
-</body>
-</html>`;
+  return renderDashboardPage({
+    updatedAt,
+    overview: buildDashboardOverview(records, items, rideSharePlans),
+    sourceHealth: buildDashboardSourceHealth(records, items, turkeyRecords),
+    cardsHtml: `${renderCurrencyConversionCards(records)}${renderNigeriaCards(records, items)}`,
+    trendsHtml: renderDashboardTrendTabs(records, items, turkeyRecords, turkeyDenoms),
+    ridesSummaryHtml: renderRideShareOverview(rideSharePlans),
+    ridesHtml: renderRideShareSection(rideSharePlans, rideSharePlansConfig),
+    ratesHtml: renderNigeriaRates(latest),
+    historyHtml: renderNigeriaHistory(records, items),
+    rideShareInitialPlans: rideSharePlansConfig,
+  });
 }
 
 function renderNigeriaRates(latest) {

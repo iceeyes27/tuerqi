@@ -11,7 +11,7 @@ globalThis.caches = {
 
 const worker = (await import("../src/index.js")).default;
 
-function testEnvironment({ omitItems = [], omitTurkeyDenoms = [], historyPointCount = 2 } = {}) {
+function testEnvironment({ omitItems = [], omitTurkeyDenoms = [], historyPointCount = 2, latestWithoutSubscriptions = false } = {}) {
   const capturedAt = new Date().toISOString();
   const history = [{
     capturedAt,
@@ -79,6 +79,9 @@ function testEnvironment({ omitItems = [], omitTurkeyDenoms = [], historyPointCo
     });
     history.unshift(earlierRecord);
   }
+  if (latestWithoutSubscriptions) {
+    history[history.length - 1].items = {};
+  }
   const turkeyHistory = [{
     capturedAt,
     sourceUrl: "https://www.seagm.com/zh-cn/itunes-gift-card-turkey",
@@ -144,6 +147,13 @@ test("renders separate Bolivia and Philippines cards and omits seat detail table
   assert.match(body, /US\$146\.13/);
   assert.match(body, /¥982\.41/);
   assert.match(body, /编辑拼车/);
+  assert.match(body, /class="dashboard-shell"/);
+  assert.match(body, /data-dashboard-nav="overview"/);
+  assert.match(body, /data-dashboard-nav="prices"/);
+  assert.match(body, /data-dashboard-nav="rides"/);
+  assert.match(body, /data-dashboard-nav="records"/);
+  assert.match(body, /data-dashboard-view="overview"/);
+  assert.doesNotMatch(body, /移动端导航/);
   assert.match(body, /\.trend-tabs \{[^}]*flex-wrap: nowrap;/);
   assert.match(body, />玻利维亚<\/button>.*>菲律宾<\/button>.*>YouTube<\/button>.*>Spotify<\/button>.*>土耳其礼品卡<\/button>/);
   assert.match(body, /data-trend-tab[^>]*>YouTube<\/button>/);
@@ -172,6 +182,20 @@ test("renders separate Bolivia and Philippines cards and omits seat detail table
   assert.match(body, /window\.location\.hash\.slice\(1\)/);
   assert.doesNotMatch(body, /Claude Pro/);
   assert.doesNotMatch(body, /车位明细/);
+});
+
+test("uses the latest valid subscription prices when the newest record only has FX data", async () => {
+  const response = await worker.fetch(
+    new Request("https://example.test/"),
+    testEnvironment({ latestWithoutSubscriptions: true }),
+    executionContext,
+  );
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(body, /最近有效价 ¥17\.21/);
+  assert.match(body, /最近有效价 ¥11\.80/);
+  assert.doesNotMatch(body, /价格读取失败/);
 });
 
 test("keeps a combined subscription chart when one plan has no data", async () => {
