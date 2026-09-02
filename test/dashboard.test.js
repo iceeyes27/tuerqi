@@ -136,16 +136,27 @@ function testEnvironment({ omitItems = [], omitTurkeyDenoms = [], historyPointCo
 
 const executionContext = { waitUntil() {} };
 
-test("renders separate Bolivia and Philippines cards and omits seat detail tables", async () => {
+test("renders every watched latest value on the homepage and keeps history in later views", async () => {
   const response = await worker.fetch(new Request("https://example.test/"), testEnvironment(), executionContext);
   const body = await response.text();
 
   assert.equal(response.status, 200);
   assert.match(body, /玻利维亚 139\.9 BOB/);
   assert.match(body, /¥81\.5/);
-  assert.match(body, /菲律宾 9010 PHP/);
+  assert.match(body, /9010 PHP → USD/);
+  assert.match(body, /9010 PHP → CNY/);
   assert.match(body, /US\$146\.13/);
   assert.match(body, /¥982\.41/);
+  assert.match(body, /YouTube Premium 单人/);
+  assert.match(body, /YouTube Premium 家庭/);
+  assert.match(body, /Spotify 个人/);
+  assert.match(body, /Spotify 家庭/);
+  assert.match(body, /500 TL 礼品卡/);
+  assert.match(body, /1000 TL 礼品卡/);
+  assert.match(body, /2000 TL 礼品卡/);
+  assert.equal((body.match(/class="latest-card"/g) || []).length, 10);
+  assert.match(body, /data-dashboard-nav="overview"[^>]*><svg[^>]*>.*?<span>首页<\/span>/s);
+  assert.match(body, /data-dashboard-nav="prices"[^>]*><svg[^>]*>.*?<span>历史趋势<\/span>/s);
   assert.match(body, /编辑拼车/);
   assert.match(body, /class="dashboard-shell"/);
   assert.match(body, /data-dashboard-nav="overview"/);
@@ -153,6 +164,14 @@ test("renders separate Bolivia and Philippines cards and omits seat detail table
   assert.match(body, /data-dashboard-nav="rides"/);
   assert.match(body, /data-dashboard-nav="records"/);
   assert.match(body, /data-dashboard-view="overview"/);
+  const overviewHtml = body.match(/<section class="dashboard-view" data-dashboard-view="overview">([\s\S]*?)<section class="dashboard-view" data-dashboard-view="prices"/)?.[1] || "";
+  assert.doesNotMatch(overviewHtml, /<svg class="trend"/);
+  assert.match(overviewHtml, /汇率换算/);
+  assert.match(overviewHtml, /订阅价格/);
+  assert.match(overviewHtml, /土耳其礼品卡/);
+  const historyViewHtml = body.match(/<section class="dashboard-view" data-dashboard-view="prices"[^>]*>([\s\S]*?)<section class="dashboard-view" data-dashboard-view="rides"/)?.[1] || "";
+  assert.match(historyViewHtml, /data-trend-tabs/);
+  assert.doesNotMatch(historyViewHtml, /class="latest-card"/);
   assert.doesNotMatch(body, /移动端导航/);
   assert.match(body, /\.trend-tabs \{[^}]*flex-wrap: nowrap;/);
   assert.match(body, />玻利维亚<\/button>.*>菲律宾<\/button>.*>YouTube<\/button>.*>Spotify<\/button>.*>土耳其礼品卡<\/button>/);

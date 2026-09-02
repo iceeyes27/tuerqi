@@ -3,6 +3,8 @@ import {
   extractGoogleFinanceRate,
   googleFinanceQuoteUrls,
 } from "./google-finance.js";
+import { extractNigeriaPlanPrice } from "./appstore-price.js";
+import { dashboardCollectionError } from "./monitor-health.js";
 import { renderDashboardPage } from "./ui/dashboard-page.js";
 
 const HISTORY_KEY = "seagm:history:v1";
@@ -252,6 +254,8 @@ async function runAllMonitors(env, options = {}) {
   }
   if (nigeria.status === "rejected") {
     errors.push({ site: "nigeria", error: String(nigeria.reason?.message || nigeria.reason) });
+  } else if (!nigeria.value.ok) {
+    errors.push({ site: "nigeria", error: nigeria.value.error || "Dashboard collection incomplete" });
   }
 
   return {
@@ -302,8 +306,11 @@ async function runNigeriaMonitor(env, options = {}) {
     missingConversions: googleConversions.missing,
   });
 
+  const collectionError = dashboardCollectionError(nigeria.missing, googleConversions.missing);
+
   return {
-    ok: true,
+    ok: !collectionError,
+    error: collectionError,
     dryRun: Boolean(options.dryRun),
     record,
     missing: nigeria.missing,
@@ -388,61 +395,6 @@ async function fetchAppStoreHtml(url) {
   }
 
   return response.text();
-}
-
-// Pulls the Nigeria (NG/NGN) price for a single subscription plan. The page
-// embeds Next.js RSC-escaped JSON where each plan is one object keyed by
-// `subscriptionId`, e.g.
-//   \"subscriptionId\":\"...\",\"name\":\"YouTube Premium\",...,\"duration\":\"monthly\",...,
-//   \"prices\":[{\"region\":\"NG\",...,\"currency\":\"NGN\",\"price\":2200,\"priceUsd\":1.62,\"priceCny\":10.97}, ...]
-// Falls back to plain (unescaped) JSON in case the embedding format changes.
-function extractNigeriaPlanPrice(pageHtml, planName, duration = "monthly") {
-  const variants = [
-    {
-      split: '\\"subscriptionId\\":',
-      name: /^\\"[^"\\]*\\",\\"name\\":\\"([^"\\]+)\\"/,
-      duration: /\\"duration\\":\\"([^"\\]+)\\"/,
-      ng: /\\"region\\":\\"NG\\",\\"regionName\\":\\"[^"\\]*\\",\\"currency\\":\\"NGN\\",\\"price\\":([0-9.]+),\\"priceUsd\\":([0-9.]+),\\"priceCny\\":([0-9.]+)/,
-    },
-    {
-      split: '"subscriptionId":',
-      name: /^"[^"]*","name":"([^"]+)"/,
-      duration: /"duration":"([^"]+)"/,
-      ng: /"region":"NG","regionName":"[^"]*","currency":"NGN","price":([0-9.]+),"priceUsd":([0-9.]+),"priceCny":([0-9.]+)/,
-    },
-  ];
-
-  const target = planName.toLowerCase();
-  for (const variant of variants) {
-    const blocks = pageHtml.split(variant.split);
-    if (blocks.length < 2) {
-      continue;
-    }
-
-    for (const block of blocks.slice(1)) {
-      const nameMatch = block.match(variant.name);
-      if (!nameMatch || nameMatch[1].toLowerCase() !== target) {
-        continue;
-      }
-
-      const durationMatch = block.match(variant.duration);
-      if (duration && durationMatch && durationMatch[1] !== duration) {
-        continue;
-      }
-
-      const ng = block.match(variant.ng);
-      if (!ng) {
-        continue;
-      }
-
-      const priceCny = Number(ng[3]);
-      if (Number.isFinite(priceCny) && priceCny > 0) {
-        return { priceNgn: Number(ng[1]), priceUsd: Number(ng[2]), priceCny };
-      }
-    }
-  }
-
-  return null;
 }
 
 // Pulls the source's USD-based FX table + data date so the page can show the
@@ -1001,25 +953,6 @@ function latestNigeriaItemSnapshot(records, items) {
   };
 }
 
-function seriesChangePercent(series, valueKey = "priceCny") {
-  if (series.length < 2) {
-    return 0;
-  }
-  const first = Number(series[0]?.[valueKey]);
-  const latest = Number(series[series.length - 1]?.[valueKey]);
-  return first > 0 && Number.isFinite(latest) ? round2((latest / first - 1) * 100) : 0;
-}
-
-function dashboardChangeMeta(percent) {
-  if (percent > 0) {
-    return { text: `↗ ${formatSignedPercent(percent)}`, tone: "positive" };
-  }
-  if (percent < 0) {
-    return { text: `↘ ${formatSignedPercent(percent)}`, tone: "negative" };
-  }
-  return { text: "→ 0%", tone: "neutral" };
-}
-
 function dashboardRenewStatus(plan) {
   if (!plan.renewOn) {
     return { label: "未填写到期日", tone: "muted" };
@@ -1033,18 +966,10 @@ function dashboardRenewStatus(plan) {
   return { label: `${plan.daysUntilRenew} 天后到期`, tone: "positive" };
 }
 
-function buildDashboardOverview(records, items, rideSharePlans) {
-  const boliviaDefinition = CURRENCY_CONVERSIONS.find((item) => item.key === "bolivia-bob-cny");
-  const boliviaSeries = currencyConversionSeries(records, boliviaDefinition.key);
-  const boliviaLatest = boliviaSeries[boliviaSeries.length - 1] || null;
-  const boliviaFirst = boliviaSeries[0] || null;
-  const boliviaPercent = seriesChangePercent(boliviaSeries, "convertedAmount");
-  const boliviaChange = dashboardChangeMeta(boliviaPercent);
-
+function buildDashboardOverview(records, items, turkeyRecords, turkeyDenoms, rideSharePlans) {
   const latestSubscriptions = items
     .map((item) => ({ item, price: latestNigeriaItemEntry(records, item.key) }))
     .filter((entry) => entry.price);
-  const cheapest = [...latestSubscriptions].sort((a, b) => Number(a.price.priceCny) - Number(b.price.priceCny))[0] || null;
   const rideSummary = summarizeRideSharePlans(rideSharePlans);
 
   const latestDashboardTime = records.length ? Date.parse(records[records.length - 1].capturedAt) : NaN;
@@ -1055,70 +980,51 @@ function buildDashboardOverview(records, items, rideSharePlans) {
   const notice = staleDays != null && staleDays > 2
     ? { title: "订阅源数据较旧", detail: `当前展示最近一次有效价格，距汇率最新记录约 ${staleDays} 天。` }
     : null;
-
-  const watchConversion = (label, usdDefinition, cnyDefinition) => {
-    const usd = latestCurrencyConversion(records, usdDefinition.key);
-    const cny = latestCurrencyConversion(records, cnyDefinition.key);
+  const conversionItems = CURRENCY_CONVERSIONS.map((definition) => {
+    const latest = latestCurrencyConversion(records, definition.key);
     return {
-      label,
-      value: cny ? formatCurrencyAmount(cny.convertedAmount, "CNY") : "--",
-      meta: usd ? formatCurrencyAmount(usd.convertedAmount, "USD") : "USD --",
-      change: "今日更新",
-      tone: "neutral",
+      label: definition.short,
+      value: latest ? formatCurrencyAmount(latest.convertedAmount, definition.quoteCurrency) : "--",
+      meta: latest
+        ? `1 ${definition.baseCurrency} ≈ ${formatCurrencyAmount(latest.rate, definition.quoteCurrency, 6)}`
+        : "等待首次抓取",
+      source: "Google Finance",
+      updatedAt: latest ? formatDateTime(latest.capturedAt) : "暂无数据",
     };
-  };
-
-  const watchSubscription = (key, label) => {
-    const item = items.find((entry) => entry.key === key);
-    const price = latestNigeriaItemEntry(records, key);
-    const series = nigeriaItemSeries(records, key);
-    const change = dashboardChangeMeta(seriesChangePercent(series));
+  });
+  const subscriptionItems = items.map((item) => {
+    const latest = latestNigeriaItemEntry(records, item.key);
     return {
-      label,
+      label: item.label,
+      value: latest ? formatCny(latest.priceCny) : "--",
+      meta: latest
+        ? `${formatInteger(latest.priceNgn)} NGN · ${formatCurrencyAmount(latest.priceUsd, "USD")}`
+        : "等待首次抓取",
+      source: "App Store Price",
+      updatedAt: latest ? formatDateTime(latest.capturedAt) : "暂无数据",
+    };
+  });
+  const latestTurkey = latestRecord(turkeyRecords);
+  const turkeyItems = turkeyDenoms.map((denom) => {
+    const price = latestTurkey?.prices?.find((entry) => Number(entry.denomTl) === Number(denom));
+    const googleReference = Number.isFinite(Number(price?.googlePriceCny))
+      ? `Google 参考 ¥${formatMoney(price.googlePriceCny)} · 差额 ${formatSignedMoney(price.googlePremiumCny)}`
+      : "Google 汇率暂无";
+    return {
+      label: `${denom} TL 礼品卡`,
       value: price ? formatCny(price.priceCny) : "--",
-      meta: price?.priceNgn ? `${formatInteger(price.priceNgn)} NGN` : "暂无有效价格",
-      change: item && price ? change.text : "",
-      tone: change.tone,
+      meta: price ? googleReference : "等待首次抓取",
+      source: "SEAGM",
+      updatedAt: latestTurkey ? formatDateTime(latestTurkey.capturedAt) : "暂无数据",
     };
-  };
-
-  const philippinesUsd = CURRENCY_CONVERSIONS.find((item) => item.key === "philippines-php-usd");
-  const philippinesCny = CURRENCY_CONVERSIONS.find((item) => item.key === "philippines-php-cny");
+  });
 
   return {
     notice,
-    stats: [
-      {
-        label: "玻利维亚 · 139.9 BOB",
-        value: boliviaLatest ? formatCurrencyAmount(boliviaLatest.convertedAmount, "CNY") : "--",
-        meta: boliviaChange.text,
-        tone: boliviaChange.tone,
-      },
-      {
-        label: "最低订阅月费",
-        value: cheapest ? formatCny(cheapest.price.priceCny) : "--",
-        meta: cheapest ? cheapest.item.short : "暂无数据",
-        tone: "neutral",
-      },
-      {
-        label: "可外拼车位",
-        value: String(rideSummary.totalAvailableSeats),
-        meta: rideSummary.totalAvailableSeats > 0 ? "有空位" : "已满",
-        tone: rideSummary.totalAvailableSeats > 0 ? "positive" : "neutral",
-      },
-    ],
-    chart: {
-      title: boliviaDefinition.label,
-      caption: `最近 ${boliviaSeries.length} 次记录`,
-      value: boliviaLatest ? formatCurrencyAmount(boliviaLatest.convertedAmount, "CNY") : "--",
-      change: boliviaLatest && boliviaFirst ? formatSignedMoney(round2(boliviaLatest.convertedAmount - boliviaFirst.convertedAmount)) : "--",
-      tone: boliviaLatest && boliviaFirst && boliviaLatest.convertedAmount < boliviaFirst.convertedAmount ? "positive" : "neutral",
-      html: renderCurrencyConversionChart(records, boliviaDefinition, "overview-bolivia"),
-    },
-    watch: [
-      watchConversion("菲律宾 9010 PHP", philippinesUsd, philippinesCny),
-      watchSubscription("youtube-family", "YouTube 家庭"),
-      watchSubscription("spotify-family", "Spotify 家庭"),
+    groups: [
+      { key: "conversions", title: "汇率换算", caption: "关注金额按最新汇率换算", items: conversionItems },
+      { key: "subscriptions", title: "订阅价格", caption: "尼日利亚区月付套餐最近有效价格", items: subscriptionItems },
+      { key: "gift-cards", title: "土耳其礼品卡", caption: "SEAGM 售价与 Google 汇率参考", items: turkeyItems },
     ],
     ridesLabel: `${rideSummary.totalOccupiedSeats} / ${rideSummary.totalSellableSeats} 已上车`,
     ridePlans: rideSharePlans.map((plan) => {
@@ -1184,15 +1090,18 @@ function renderNigeriaDashboard(history, turkeyHistory, env, rideShareConfig = n
   const turkeyDenoms = parseDenoms(env.DENOMS);
   const items = nigeriaItems();
   const latest = records[records.length - 1] || null;
-  const updatedAt = latest ? formatDateTime(latest.capturedAt) : "暂无数据";
+  const latestTurkey = latestRecord(turkeyRecords);
+  const updatedRecord = [latest, latestTurkey]
+    .filter(Boolean)
+    .sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))[0] || null;
+  const updatedAt = updatedRecord ? formatDateTime(updatedRecord.capturedAt) : "暂无数据";
   const rideSharePlansConfig = rideShareConfig || parseRideSharePlans(env);
   const rideSharePlans = buildRideSharePlans(rideSharePlansConfig, latestNigeriaItemSnapshot(records, items));
 
   return renderDashboardPage({
     updatedAt,
-    overview: buildDashboardOverview(records, items, rideSharePlans),
+    overview: buildDashboardOverview(records, items, turkeyRecords, turkeyDenoms, rideSharePlans),
     sourceHealth: buildDashboardSourceHealth(records, items, turkeyRecords),
-    cardsHtml: `${renderCurrencyConversionCards(records)}${renderNigeriaCards(records, items)}`,
     trendsHtml: renderDashboardTrendTabs(records, items, turkeyRecords, turkeyDenoms),
     ridesSummaryHtml: renderRideShareOverview(rideSharePlans),
     ridesHtml: renderRideShareSection(rideSharePlans, rideSharePlansConfig),
@@ -1261,72 +1170,6 @@ function renderNigeriaHistory(records, items) {
       <tbody>${rows}</tbody>
     </table></div>
   </section>`;
-}
-
-function renderCurrencyConversionCards(records) {
-  const bolivia = CURRENCY_CONVERSIONS.find((item) => item.key === "bolivia-bob-cny");
-  const philippinesUsd = CURRENCY_CONVERSIONS.find((item) => item.key === "philippines-php-usd");
-  const philippinesCny = CURRENCY_CONVERSIONS.find((item) => item.key === "philippines-php-cny");
-  return `${renderSingleConversionCard(records, bolivia)}${renderPhilippinesConversionCard(records, philippinesUsd, philippinesCny)}`;
-}
-
-function renderSingleConversionCard(records, definition) {
-  const latest = latestCurrencyConversion(records, definition.key);
-  if (!latest) {
-    return `<article class="card"><div class="label">${escapeHtml(definition.label)}</div><div class="value">--</div><div class="sub">等待首次抓取</div></article>`;
-  }
-
-  const sourceUrl = googleFinanceQuoteUrls(definition.baseCurrency, definition.quoteCurrency)[0];
-  return `<article class="card">
-    <div class="label">${escapeHtml(definition.label)}</div>
-    <div class="value"><span class="hl">${formatCurrencyAmount(latest.convertedAmount, definition.quoteCurrency)}</span></div>
-    <div class="sub">1 ${definition.baseCurrency} ≈ ${formatCurrencyAmount(latest.rate, definition.quoteCurrency, 6)} · <a href="${sourceUrl}" target="_blank" rel="noreferrer">Google Finance</a><br>${escapeHtml(formatDateTime(latest.capturedAt))}</div>
-  </article>`;
-}
-
-function renderPhilippinesConversionCard(records, usdDefinition, cnyDefinition) {
-  const latestUsd = latestCurrencyConversion(records, usdDefinition.key);
-  const latestCny = latestCurrencyConversion(records, cnyDefinition.key);
-  if (!latestUsd && !latestCny) {
-    return `<article class="card"><div class="label">菲律宾 9010 PHP</div><div class="value">--</div><div class="sub">等待首次抓取</div></article>`;
-  }
-
-  const latestTime = [latestUsd, latestCny]
-    .filter(Boolean)
-    .sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))[0].capturedAt;
-  const usdSource = googleFinanceQuoteUrls("PHP", "USD")[0];
-  const cnySource = googleFinanceQuoteUrls("PHP", "CNY")[0];
-  return `<article class="card">
-    <div class="label">菲律宾 9010 PHP</div>
-    <div class="value dual">
-      <span><span class="hl">${latestUsd ? formatCurrencyAmount(latestUsd.convertedAmount, "USD") : "USD --"}</span></span>
-      <span><span class="hl">${latestCny ? formatCurrencyAmount(latestCny.convertedAmount, "CNY") : "CNY --"}</span></span>
-    </div>
-    <div class="sub"><a href="${usdSource}" target="_blank" rel="noreferrer">PHP/USD</a> · <a href="${cnySource}" target="_blank" rel="noreferrer">PHP/CNY</a> · Google Finance<br>${escapeHtml(formatDateTime(latestTime))}</div>
-  </article>`;
-}
-
-function renderNigeriaCards(records, items) {
-  return items.map((item) => {
-    const series = nigeriaItemSeries(records, item.key);
-    if (series.length === 0) {
-      return `<article class="card"><div class="label">${escapeHtml(item.label)}</div><div class="value">--</div><div class="sub">等待首次抓取</div></article>`;
-    }
-
-    const latest = series[series.length - 1];
-    const first = series[0];
-    const changePercent = Number(first.priceCny) > 0
-      ? round2((Number(latest.priceCny) / Number(first.priceCny) - 1) * 100)
-      : 0;
-    const direction = changePercent > 0 ? "up" : changePercent < 0 ? "down" : "";
-    const arrow = changePercent > 0 ? "↗" : changePercent < 0 ? "↘" : "→";
-
-    return `<article class="card">
-      <div class="label">${escapeHtml(item.label)}</div>
-      <div class="value"><span class="hl">¥${formatMoney(latest.priceCny)}</span></div>
-      <div class="sub">${formatInteger(latest.priceNgn)} NGN · <span class="${direction}">${arrow} ${formatSignedPercent(changePercent)}</span></div>
-    </article>`;
-  }).join("");
 }
 
 async function loadRideShareConfig(env) {
@@ -1722,7 +1565,6 @@ function renderDashboardTrendPanel(records, turkeyRecords, turkeyDenoms, definit
 }
 
 function renderTurkeyTrendPanel(records, denoms, index) {
-  const latest = latestRecord(records);
   const definitions = denoms.map((denom, denomIndex) => ({
     key: `turkey-${denom}`,
     label: `${denom} TL`,
@@ -1749,7 +1591,6 @@ function renderTurkeyTrendPanel(records, denoms, index) {
   }));
 
   return `<div class="turkey-tab-content">
-    <section class="cards turkey-cards" aria-label="土耳其礼品卡最新价格">${renderLatestCards(latest, denoms)}</section>
     <div class="trend-summary">${summary}</div>
     <div class="trend-legend" aria-label="土耳其礼品卡图例">${legend}</div>
     <div class="chart-wrap">${renderMultiSeriesTrendChart(chartSeries, {
@@ -2098,25 +1939,6 @@ function renderTrendTooltip(point, color, width, pad, tooltipDate = formatDay, f
     <text x="${(x + 12).toFixed(2)}" y="${(y + 18).toFixed(2)}" fill="#1c2321" font-size="13" font-weight="750">${escapeHtml(formatValue(point.price))}</text>
     <text x="${(x + 12).toFixed(2)}" y="${(y + 35).toFixed(2)}" fill="#66706b" font-size="12">${tooltipDate(point.capturedAt)}</text>
   </g>`;
-}
-
-function renderLatestCards(latest, denoms) {
-  return denoms.map((denom) => {
-    const price = latest?.prices?.find((item) => item.denomTl === denom);
-    if (!price) {
-      return `<article class="card"><div class="label">${denom} TL</div><div class="price">--</div><div class="sub">等待首次抓取</div></article>`;
-    }
-
-    const googleLine = Number.isFinite(price.googlePriceCny)
-      ? `Google ¥${formatMoney(price.googlePriceCny)} · 差额 ${formatSignedMoney(price.googlePremiumCny)} · ${formatSignedPercent(price.googlePremiumPercent)}`
-      : "Google 汇率暂无";
-
-    return `<article class="card">
-      <div class="label">${denom} TL</div>
-      <div class="price">¥${formatMoney(price.priceCny)}</div>
-      <div class="sub">原价 ¥${formatMoney(price.originalPriceCny)} · 折扣 ${formatMoney(price.discountPercent)}%<br>${googleLine}<br>SEAGM Credits ${price.credits}</div>
-    </article>`;
-  }).join("");
 }
 
 function renderHistoryTable(records, denoms) {

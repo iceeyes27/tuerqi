@@ -23,21 +23,19 @@ function icon(name) {
   return `<svg class="app-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ""}</svg>`;
 }
 
-function renderStats(items) {
-  return items.map((item) => `<article class="overview-stat">
-    <div class="overview-stat-label">${escapeHtml(item.label)}</div>
-    <div class="overview-stat-row">
-      <strong>${escapeHtml(item.value)}</strong>
-      <span class="tone-${escapeHtml(item.tone || "neutral")}">${escapeHtml(item.meta)}</span>
+function renderLatestGroups(groups) {
+  return groups.map((group) => `<section class="latest-section" aria-labelledby="latest-${escapeHtml(group.key)}">
+    <div class="latest-section-head">
+      <div><h2 id="latest-${escapeHtml(group.key)}">${escapeHtml(group.title)}</h2><p>${escapeHtml(group.caption)}</p></div>
+      <span>${group.items.length} 项</span>
     </div>
-  </article>`).join("");
-}
-
-function renderWatchItems(items) {
-  return items.map((item) => `<div class="watch-row">
-    <div class="watch-title"><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.value)}</span></div>
-    <p>${escapeHtml(item.meta)}${item.change ? ` · <span class="tone-${escapeHtml(item.tone || "neutral")}">${escapeHtml(item.change)}</span>` : ""}</p>
-  </div>`).join("");
+    <div class="latest-grid">${group.items.map((item) => `<article class="latest-card">
+      <div class="latest-card-label">${escapeHtml(item.label)}</div>
+      <strong>${escapeHtml(item.value)}</strong>
+      <p>${escapeHtml(item.meta)}</p>
+      <div class="latest-card-source"><span>${escapeHtml(item.source)}</span><time>${escapeHtml(item.updatedAt)}</time></div>
+    </article>`).join("")}</div>
+  </section>`).join("");
 }
 
 function renderSeatDots(plan) {
@@ -66,20 +64,7 @@ function renderOverview(overview) {
 
   return `<section class="dashboard-view" data-dashboard-view="overview">
     ${notice}
-    <div class="overview-stats">${renderStats(overview.stats)}</div>
-    <div class="overview-primary">
-      <section class="dashboard-panel overview-chart-panel">
-        <div class="dashboard-panel-head">
-          <div><h2>${escapeHtml(overview.chart.title)}</h2><p>${escapeHtml(overview.chart.caption)}</p></div>
-          <div class="overview-current"><strong>${escapeHtml(overview.chart.value)}</strong><span class="tone-${escapeHtml(overview.chart.tone || "neutral")}">${escapeHtml(overview.chart.change)}</span></div>
-        </div>
-        <div class="chart-wrap overview-chart">${overview.chart.html}</div>
-      </section>
-      <section class="dashboard-panel watch-panel">
-        <div class="dashboard-panel-head"><div><h2>关注项目</h2><p>关键价格一眼看完</p></div></div>
-        <div class="watch-list">${renderWatchItems(overview.watch)}</div>
-      </section>
-    </div>
+    <div class="latest-groups">${renderLatestGroups(overview.groups)}</div>
     <section class="dashboard-panel overview-rides">
       <div class="dashboard-panel-head">
         <div><h2>拼车账户</h2><p>续费、车位与收款统一管理</p></div>
@@ -158,30 +143,27 @@ const DASHBOARD_STYLES = `
   .source-notice { display: flex; align-items: center; gap: 10px; min-height: 46px; padding: 10px 14px; border: 1px solid #ddcfb6; border-radius: 11px; background: var(--app-warning-soft); font-size: 14px; }
   .source-notice .app-icon { color: var(--app-warning); }
   .source-notice span { color: var(--app-muted); }
-  .overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
-  .overview-stat { padding: 17px; border: 1px solid var(--app-line); border-radius: 14px; background: var(--app-panel); box-shadow: var(--app-shadow); }
-  .overview-stat-label { color: var(--app-muted); font-size: 13px; }
-  .overview-stat-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 12px; }
-  .overview-stat-row strong { font-size: 27px; line-height: 1; letter-spacing: -.03em; }
   .tone-positive { color: var(--app-accent); }
   .tone-negative { color: var(--app-danger); }
   .tone-warning { color: var(--app-warning); }
   .tone-neutral { color: var(--app-muted); }
-  .overview-primary { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, .8fr); gap: 12px; margin-top: 12px; }
   .dashboard-panel, .panel { border: 1px solid var(--app-line); border-radius: 14px; background: var(--app-panel); box-shadow: var(--app-shadow); overflow: hidden; }
   .dashboard-panel-head, .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 18px; border-bottom: 1px solid var(--app-line); }
   .dashboard-panel-head h2, .panel-head h2 { margin: 0; font-size: 16px; }
   .dashboard-panel-head p, .phead-meta { margin: 4px 0 0; color: var(--app-muted); font-size: 13px; }
-  .overview-current { text-align: right; }
-  .overview-current strong { display: block; font-size: 23px; }
-  .overview-current span { font-size: 13px; }
-  .overview-chart { padding: 10px 12px 4px; }
-  .watch-list { display: grid; }
-  .watch-row { padding: 16px; border-bottom: 1px solid var(--app-line); }
-  .watch-row:last-child { border-bottom: 0; }
-  .watch-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 14px; }
-  .watch-row p { margin: 8px 0 0; color: var(--app-muted); font-size: 13px; }
-  .overview-rides { margin-top: 12px; }
+  .latest-groups { display: grid; gap: 22px; margin-top: 16px; }
+  .latest-section-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+  .latest-section-head h2 { margin: 0; font-size: 17px; }
+  .latest-section-head p { margin: 4px 0 0; color: var(--app-muted); font-size: 13px; }
+  .latest-section-head > span { color: var(--app-muted); font-size: 12px; font-weight: 700; }
+  .latest-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+  .latest-card { min-width: 0; padding: 16px; border: 1px solid var(--app-line); border-radius: 13px; background: var(--app-panel); box-shadow: var(--app-shadow); }
+  .latest-card-label { overflow: hidden; color: var(--app-muted); font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+  .latest-card > strong { display: block; margin-top: 11px; font-size: 26px; line-height: 1.1; letter-spacing: -.025em; }
+  .latest-card > p { min-height: 34px; margin: 10px 0 0; color: var(--app-muted); font-size: 12px; line-height: 1.45; }
+  .latest-card-source { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--app-line); color: var(--app-muted); font-size: 11px; }
+  .latest-card-source time { overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  .overview-rides { margin-top: 22px; }
   .overview-ride-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-ride { padding: 17px 18px; }
   .overview-ride + .overview-ride { border-left: 1px solid var(--app-line); }
@@ -281,29 +263,25 @@ const DASHBOARD_STYLES = `
     .dashboard-brand { padding: 0 4px; gap: 8px; }
     .dashboard-brand small { display: none; }
     .dashboard-main { padding: 16px; }
-    .overview-primary { grid-template-columns: minmax(0, 1.45fr) minmax(176px, .75fr); }
-    .overview-stat { padding: 14px; }
-    .overview-stat-row strong { font-size: 23px; }
     .dashboard-panel-head, .panel-head { padding: 14px; }
-    .watch-row, .overview-ride, .ride-card { padding: 14px; }
+    .latest-card, .overview-ride, .ride-card { padding: 14px; }
     .source-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .source-health-item:nth-child(2) { border-right: 0; }
     .source-health-item:nth-child(-n+2) { border-bottom: 1px solid var(--app-line); }
   }
   @media (min-width: 1280px) {
-    .overview-primary { grid-template-columns: minmax(0, 2.2fr) minmax(320px, .8fr); gap: 16px; }
-    .overview-stats { gap: 16px; }
-    .overview-primary, .overview-rides { margin-top: 16px; }
+    .latest-grid { gap: 16px; }
+    .overview-rides { margin-top: 24px; }
   }
 `;
 
 function clientScript(rideShareInitialPlans) {
   return `
     const dashboardCopy = {
-      overview: ["跨区价格总览", "汇率、订阅与拼车关键状态"],
-      prices: ["价格追踪", "汇率、订阅与礼品卡趋势"],
-      rides: ["拼车账本", "车位、到期与收款管理"],
-      records: ["数据记录", "历史记录、抓取状态与技术入口"],
+      overview: ["最新数据", "所有关注项目的最近有效值"],
+      prices: ["历史趋势", "按项目查看汇率、订阅与礼品卡历史"],
+      rides: ["拼车管理", "车位、到期与收款管理"],
+      records: ["历史记录", "每日记录、数据源状态与技术入口"],
     };
     const navButtons = [...document.querySelectorAll("[data-dashboard-nav]")];
     const views = [...document.querySelectorAll("[data-dashboard-view]")];
@@ -483,9 +461,8 @@ export function renderDashboardPage(model) {
   const healthyCount = model.sourceHealth.filter((item) => item.tone === "positive").length;
   const overview = renderOverview(model.overview);
   const prices = `<section class="dashboard-view" data-dashboard-view="prices" hidden>
-    <div class="view-header"><div><h2>全部价格</h2><p>切换分组查看汇率、订阅与礼品卡趋势</p></div></div>
+    <div class="view-header"><div><h2>关注项目历史</h2><p>切换分组查看每日走势、累计变化与历史明细</p></div></div>
     <section class="dashboard-panel price-trends">${model.trendsHtml}</section>
-    <div class="cards">${model.cardsHtml}</div>
   </section>`;
   const rides = `<section class="dashboard-view" data-dashboard-view="rides" hidden>
     <div class="view-header"><div><h2>拼车账户</h2><p>成本、车位、到期与收款集中管理</p></div></div>
@@ -513,17 +490,17 @@ export function renderDashboardPage(model) {
     <aside class="dashboard-sidebar">
       <div class="dashboard-brand"><span class="dashboard-logo">R</span><span><strong>跨区账本</strong><small>Region Ledger</small></span></div>
       <nav class="dashboard-nav" aria-label="主导航">
-        ${renderNavItem("overview", "总览", "overview", true)}
-        ${renderNavItem("prices", "价格追踪", "prices")}
-        ${renderNavItem("rides", "拼车账本", "rides")}
-        ${renderNavItem("records", "数据记录", "records")}
+        ${renderNavItem("overview", "首页", "overview", true)}
+        ${renderNavItem("prices", "历史趋势", "prices")}
+        ${renderNavItem("rides", "拼车管理", "rides")}
+        ${renderNavItem("records", "历史记录", "records")}
       </nav>
       <div class="sidebar-status">数据源状态<strong>${healthyCount} / ${model.sourceHealth.length} 正常</strong></div>
     </aside>
     <main class="dashboard-main">
       <div class="dashboard-content">
         <header class="dashboard-topbar">
-          <div class="dashboard-title"><h1 data-page-title>跨区价格总览</h1><p><span data-page-subtitle>汇率、订阅与拼车关键状态</span> · ${escapeHtml(model.updatedAt)} 更新</p></div>
+          <div class="dashboard-title"><h1 data-page-title>最新数据</h1><p><span data-page-subtitle>所有关注项目的最近有效值</span> · ${escapeHtml(model.updatedAt)} 更新</p></div>
           <div class="dashboard-actions"><button class="btn" type="button" data-scrape>${icon("refresh")}刷新数据</button></div>
         </header>
         ${overview}${prices}${rides}${records}
